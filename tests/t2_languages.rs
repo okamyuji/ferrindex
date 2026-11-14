@@ -304,6 +304,46 @@ fn csharp_defs_and_bodies() {
 }
 
 #[test]
+fn csharp_enums_structs_and_records_are_classes_inside_their_namespace() {
+    let r = rows("csharp/Types.cs");
+    check(
+        row(&r, "Color"),
+        "class",
+        3,
+        Some("Demo"),
+        "public enum Color\n    {\n        Red,\n    }",
+    );
+    check(
+        row(&r, "Point"),
+        "class",
+        8,
+        Some("Demo"),
+        "public struct Point\n    {\n        public int X;\n    }",
+    );
+    check(
+        row(&r, "Person"),
+        "class",
+        13,
+        Some("Demo"),
+        "public record Person(string Name);",
+    );
+    check(
+        row(&r, "Pair"),
+        "class",
+        15,
+        Some("Demo"),
+        "public record struct Pair(int A, int B);",
+    );
+    check(
+        row(&r, "Plain"),
+        "class",
+        17,
+        Some("Demo"),
+        "public record class Plain\n    {\n        public int Id { get; set; }\n    }",
+    );
+}
+
+#[test]
 fn swift_defs_and_bodies() {
     let r = rows("swift/sample.swift");
     // メソッドとプロパティはクラス全体ではなく自分の宣言だけを返す

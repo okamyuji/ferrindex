@@ -64,6 +64,16 @@ pub fn lang_of(path: &Path) -> Option<Lang> {
     Some(lang)
 }
 
+/// 同梱の tags.scm が捕捉しない定義。struct と enum は Rust の tags.scm に合わせて class にする。
+/// 索引の指紋に入れるので、変えると既存の索引は作り直される。
+const CSHARP_EXTRA: &str = "\
+(enum_declaration name: (identifier) @name) @definition.class
+(struct_declaration name: (identifier) @name) @definition.class
+(record_declaration name: (identifier) @name) @definition.class";
+
+/// 追加した query の全文。索引の指紋の入力にする。
+pub const EXTRA_QUERIES: &str = CSHARP_EXTRA;
+
 static CONFIGS: [OnceLock<TagsConfiguration>; Lang::ALL.len()] =
     [const { OnceLock::new() }; Lang::ALL.len()];
 
@@ -123,6 +133,7 @@ fn build(lang: Lang) -> TagsConfiguration {
             tree_sitter_c_sharp::TAGS_QUERY
                 .lines()
                 .filter(|l| !l.trim_end().ends_with(" @module"))
+                .chain([CSHARP_EXTRA])
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
