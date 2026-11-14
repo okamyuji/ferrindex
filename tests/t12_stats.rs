@@ -101,7 +101,7 @@ fn rebuild_replaces_main_and_drops_delta() {
     let files = fidx_bytes(&r.xdg);
     assert_eq!(files.len(), 1, "{files:?}");
     assert_eq!(
-        r.run(&["find", "changed"]).lines(),
+        r.run(&["find", "changed"]).heads(),
         ["f0.rs:1:4 function changed"]
     );
 }

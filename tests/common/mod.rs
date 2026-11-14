@@ -16,6 +16,14 @@ impl Run {
     pub fn lines(&self) -> Vec<&str> {
         self.out.lines().collect()
     }
+
+    /// find の各行から、タブ以降のソース行を除いたもの。
+    pub fn heads(&self) -> Vec<&str> {
+        self.out
+            .lines()
+            .map(|l| l.split('\t').next().unwrap())
+            .collect()
+    }
 }
 
 pub struct Repo {

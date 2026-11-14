@@ -11,7 +11,7 @@ fn subdir_relative_paths() {
     r.write("other/out.rs", "fn target() {}\n");
     let from_root = r.run(&["find", "target"]);
     assert_eq!(
-        from_root.lines(),
+        from_root.heads(),
         [
             "other/out.rs:1:4 function target",
             "sub/in.rs:1:4 function target",
@@ -20,7 +20,7 @@ fn subdir_relative_paths() {
     );
     let from_sub = r.run_in(Path::new("sub"), &["find", "target"]);
     assert_eq!(
-        from_sub.lines(),
+        from_sub.heads(),
         [
             "../other/out.rs:1:4 function target",
             "in.rs:1:4 function target",
@@ -37,7 +37,7 @@ fn deterministic_order_and_limit() {
     r.write("c.rs", "fn dup() {}\n");
     let all = r.run(&["find", "dup"]);
     assert_eq!(
-        all.lines(),
+        all.heads(),
         [
             "a.rs:1:4 function dup",
             "b.rs:1:4 function dup",
@@ -48,7 +48,7 @@ fn deterministic_order_and_limit() {
     assert_eq!(all.err, "");
     let cut = r.run(&["find", "dup", "--limit", "2"]);
     assert_eq!(
-        cut.lines(),
+        cut.heads(),
         ["a.rs:1:4 function dup", "b.rs:1:4 function dup"]
     );
     assert_eq!(cut.err, "… 2 more\n");
@@ -72,7 +72,7 @@ fn default_limit_is_20() {
 fn exact_match_beats_substring() {
     let r = Repo::new();
     r.write("a.rs", "fn open() {}\nfn reopen_all() {}\n");
-    assert_eq!(r.run(&["find", "open"]).lines(), ["a.rs:1:4 function open"]);
+    assert_eq!(r.run(&["find", "open"]).heads(), ["a.rs:1:4 function open"]);
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn zero_exact_falls_back_to_case_insensitive_substring() {
     );
     let run = r.run(&["find", "OPEN"]);
     assert_eq!(
-        run.lines(),
+        run.heads(),
         [
             "a.rs:1:4 function reopen_all",
             "a.rs:2:4 function OpenSesame"
@@ -97,7 +97,7 @@ fn substring_fallback_respects_the_container() {
     let r = Repo::new();
     r.write("a.rs", SAMPLE);
     assert_eq!(
-        r.run(&["find", "Foo.BA"]).lines(),
+        r.run(&["find", "Foo.BA"]).heads(),
         ["a.rs:3:8 method Foo.bar"]
     );
     assert_eq!(r.run(&["find", "Nope.BA"]).code, 1);
@@ -110,8 +110,8 @@ fn substring_fallback_is_capped_at_200_names() {
     r.write("a.rs", &text);
     let run = r.run(&["find", "ZZ", "--limit", "1000"]);
     assert_eq!(run.lines().len(), 200);
-    assert_eq!(run.lines()[0], "a.rs:1:4 function zz000");
-    assert_eq!(run.lines()[199], "a.rs:200:4 function zz199");
+    assert_eq!(run.heads()[0], "a.rs:1:4 function zz000");
+    assert_eq!(run.heads()[199], "a.rs:200:4 function zz199");
 }
 
 #[test]
@@ -122,7 +122,7 @@ fn search_sees_edits_made_after_the_index_exists() {
     r.write("a.rs", "fn after_edit() {}\n\n\n");
     assert_eq!(r.run(&["find", "before"]).code, 1);
     assert_eq!(
-        r.run(&["find", "after_edit"]).lines(),
+        r.run(&["find", "after_edit"]).heads(),
         ["a.rs:1:4 function after_edit"]
     );
 }
@@ -241,7 +241,7 @@ fn control_characters_in_paths_are_escaped_in_every_command() {
     let rel = std::path::Path::new("d").join("a\nb\x01.rs");
     let rel = rel.to_str().unwrap();
     assert_eq!(
-        r.run(&["find", "zed"]).lines(),
+        r.run(&["find", "zed"]).heads(),
         [format!("{name}:1:4 function zed")]
     );
     assert_eq!(r.run(&["files", "d/"]).lines(), [name]);
@@ -263,10 +263,67 @@ fn double_colon_and_dot_qualify_names_alike() {
         let run = r.run(&["find", term]);
         assert_eq!(
             run.lines(),
-            ["app/base.rb:1:20 class ActivityPub.BaseController"],
+            [
+                "app/base.rb:1:20 class ActivityPub.BaseController\tclass ActivityPub::BaseController"
+            ],
             "{term}"
         );
     }
     r.write("a.cpp", "struct S { void f(); };\nvoid S::f() {}\n");
     assert_eq!(r.run(&["find", "S::f"]).code, 0);
+}
+
+#[test]
+fn find_appends_the_trimmed_definition_line_after_a_tab() {
+    let r = Repo::new();
+    let long = format!("fn long_one() {{ let _s = \"{}\"; }}", "x".repeat(300));
+    r.write(
+        "a.rs",
+        &format!("mod m {{\n    pub fn short_one(a: i32) {{}}\n}}\n{long}\n"),
+    );
+    let short = r.run(&["find", "short_one"]);
+    assert_eq!(
+        short.lines(),
+        ["a.rs:2:12 method m.short_one\tpub fn short_one(a: i32) {}"]
+    );
+    let line = r.run(&["find", "long_one"]).out;
+    let (head, src) = line.trim_end().split_once('\t').unwrap();
+    assert_eq!(head, "a.rs:4:4 function long_one");
+    assert_eq!(src.chars().count(), 160);
+    assert!(
+        src.ends_with('…') && src.starts_with("fn long_one"),
+        "{src}"
+    );
+    // 160 字ちょうどは切らない
+    r.write(
+        "b.rs",
+        &format!("fn exact() {{}}{}\n", "/".repeat(160 - 13)),
+    );
+    let exact = r.run(&["find", "exact"]).out;
+    assert_eq!(
+        exact.trim_end().split_once('\t').unwrap().1.chars().count(),
+        160
+    );
+    assert!(!exact.contains('…'));
+}
+
+#[test]
+fn find_escapes_control_characters_in_the_definition_line() {
+    let r = Repo::new();
+    r.write("a.rs", "fn ctl() { /* a\u{1}b\tc */ }\n");
+    let out = r.run(&["find", "ctl"]).out;
+    assert_eq!(out.lines().count(), 1);
+    assert_eq!(out.trim_end().split('\t').count(), 2, "{out:?}");
+    assert!(out.contains("a\\x01b\\x09c"), "{out:?}");
+}
+
+#[test]
+fn find_only_reads_the_files_it_shows() {
+    let r = Repo::new();
+    r.write("a.rs", "fn many() {}\n");
+    r.write("b.rs", "fn many() {}\n");
+    r.write("c.rs", "fn many() {}\n");
+    let run = r.run(&["find", "many", "--limit", "1"]);
+    assert_eq!(run.lines(), ["a.rs:1:4 function many\tfn many() {}"]);
+    assert_eq!(run.err, "… 2 more\n");
 }

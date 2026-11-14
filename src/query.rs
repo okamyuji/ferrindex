@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::{OsStr, OsString},
     fmt::Display,
     fs,
@@ -22,6 +23,7 @@ const EXIT_UNUSABLE: u8 = 3;
 const EXIT_IO: u8 = 4;
 
 const DEFAULT_LIMIT: usize = 20;
+const SOURCE_LINE_CHARS: usize = 160;
 const SHOW_LIMIT: usize = 3;
 const MAP_LIMIT: usize = 200;
 const SHOW_MAX_LINES: usize = 200;
@@ -280,31 +282,47 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
         Cmd::Find(t) => {
             let ctx = Ctx::new(cwd, grep_hint(t))?;
             let hits = resolve(&ctx.view()?, t).map_err(|c| corrupt(c, &ctx))?;
+            let shown = limit(DEFAULT_LIMIT);
+            let mut texts: HashMap<&[u8], Option<Vec<u8>>> = HashMap::new();
+            // 表示しない行のためにファイルを読まない
             let lines: Vec<Vec<u8>> = hits
                 .iter()
+                .take(shown)
                 .map(|f| {
-                    def_line(
+                    let mut l = def_line(
                         &ctx.display(&f.path),
                         f.line,
                         f.col,
                         f.kind,
                         f.container.as_deref(),
                         &f.name,
-                    )
+                    );
+                    if let Some(src) = texts
+                        .entry(&f.path)
+                        .or_insert_with(|| fs::read(ctx.root.join(OsStr::from_bytes(&f.path))).ok())
+                        .as_deref()
+                        .and_then(|t| source_line(t, f.line))
+                    {
+                        l.push(b'\t');
+                        l.extend(src);
+                    }
+                    l
                 })
                 .collect();
-            emit(out, err, &lines, limit(DEFAULT_LIMIT))
+            emit(out, err, &lines, hits.len())
         }
         Cmd::Files(t) => {
             let ctx = Ctx::new(cwd, "rg --files".into())?;
-            let lines: Vec<Vec<u8>> = ctx
+            let mut lines: Vec<Vec<u8>> = ctx
                 .view()?
                 .files()
                 .into_iter()
                 .filter(|(p, _)| contains_ignore_ascii_case(p, t.as_bytes()))
                 .map(|(p, _)| ctx.display(&p))
                 .collect();
-            emit(out, err, &lines, limit(DEFAULT_LIMIT))
+            let total = lines.len();
+            lines.truncate(limit(DEFAULT_LIMIT));
+            emit(out, err, &lines, total)
         }
         Cmd::Show(t) => {
             let ctx = Ctx::new(cwd, grep_hint(t))?;
@@ -372,14 +390,30 @@ fn def_line(
     l
 }
 
-/// 並び替え済みの行を `limit` 件まで標準出力へ。超えた分は標準エラーに件数だけ出す。
-fn emit(out: &mut impl Write, err: &mut impl Write, lines: &[Vec<u8>], limit: usize) -> Res {
-    for l in lines.iter().take(limit) {
+/// `line`（1 始まり）行目を、前後の空白を除き 160 字までにして制御文字を逃がしたもの。
+/// 行が無いとき（索引の後でファイルが縮んだ）は None。
+fn source_line(text: &[u8], line: u32) -> Option<Vec<u8>> {
+    let raw = text
+        .split(|&b| b == b'\n')
+        .nth(line.checked_sub(1)? as usize)?;
+    let s = String::from_utf8_lossy(raw);
+    let s = s.trim();
+    let cut: String = if s.chars().count() > SOURCE_LINE_CHARS {
+        s.chars().take(SOURCE_LINE_CHARS - 1).chain(['…']).collect()
+    } else {
+        s.to_string()
+    };
+    Some(escape_control(cut.as_bytes()))
+}
+
+/// 表示する行を標準出力へ。全 `total` 件のうち出さなかった分は標準エラーに件数だけ出す。
+fn emit(out: &mut impl Write, err: &mut impl Write, lines: &[Vec<u8>], total: usize) -> Res {
+    for l in lines {
         out.write_all(l)?;
         out.write_all(b"\n")?;
     }
-    more(err, lines.len().saturating_sub(limit))?;
-    Ok(!lines.is_empty())
+    more(err, total - lines.len())?;
+    Ok(total > 0)
 }
 
 fn more(err: &mut impl Write, rest: usize) -> io::Result<()> {

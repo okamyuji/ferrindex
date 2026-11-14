@@ -23,7 +23,7 @@ cargo install --path .
 検索のたびに索引を最新にするので、事前の準備は要りません。
 
 - `ferrindex update [--rebuild] [--stats]` 索引を更新します。`--rebuild` は全件を作り直します。
-- `ferrindex find <name> [--limit N]` 名前で定義を探します。
+- `ferrindex find <name> [--limit N]` 名前で定義を探します。各行の末尾にタブで区切って、その定義の行（前後の空白を除き 160 字まで）を付けます。
 - `ferrindex files <substr> [--limit N]` パスの一部でファイルを探します。
 - `ferrindex outline <file>` ファイル内の定義を一覧します。
 - `ferrindex show <name> [--limit N]` 定義の本体を表示します。
@@ -33,7 +33,7 @@ cargo install --path .
 
 ```text
 $ ferrindex find main
-build.rs:110:4 function main
+build.rs:110:4 function main	fn main() {
 $ ferrindex files cli
 difftest/scripts/cli_table.py
 $ ferrindex outline src/main.rs

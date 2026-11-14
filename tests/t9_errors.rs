@@ -115,7 +115,7 @@ fn corrupt_index_is_rebuilt_and_search_succeeds() {
     }
     let run = r.run(&["find", "here"]);
     assert_eq!(run.code, 0, "{}", run.err);
-    assert_eq!(run.lines(), ["a.rs:1:4 function here"]);
+    assert_eq!(run.heads(), ["a.rs:1:4 function here"]);
 }
 
 #[test]
