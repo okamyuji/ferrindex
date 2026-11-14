@@ -367,6 +367,9 @@ fn read_loop(mut r: impl BufRead, tx: &Sender<Result<Value, LspError>>) {
     }));
 }
 
+/// 1 通の本文の上限。巨大な Content-Length をそのまま確保すると、確保の失敗でプロセスごと落ちる。
+const MAX_BODY: usize = 64 << 20;
+
 /// ヘッダでない行は、その行を理由にして失敗にする（jdtls は起動に失敗すると素の文を出す）。
 fn read_message(r: &mut impl BufRead) -> Result<Option<Value>, String> {
     let mut len = None;
@@ -387,7 +390,13 @@ fn read_message(r: &mut impl BufRead) -> Result<Option<Value>, String> {
             _ => return Err(line.to_string()),
         }
     }
-    let mut body = vec![0; len.ok_or("Content-Length がありません")?];
+    let len = len.ok_or("Content-Length がありません")?;
+    if len > MAX_BODY {
+        return Err(format!(
+            "Content-Length {len} が上限の {MAX_BODY} を超えます"
+        ));
+    }
+    let mut body = vec![0; len];
     r.read_exact(&mut body).map_err(|e| e.to_string())?;
     serde_json::from_slice(&body)
         .map(Some)
@@ -494,6 +503,22 @@ mod tests {
         assert!(err("Content-Length: x\r\n\r\n").contains("invalid digit"));
         assert!(err("Content-Length: 5\r\n\r\n{}").contains("fill whole buffer"));
         assert!(err(&framed("{")).contains("EOF"));
+    }
+
+    #[test]
+    fn read_message_rejects_a_body_over_the_cap_before_allocating() {
+        let err = |n: usize| {
+            read_message(&mut Cursor::new(format!("Content-Length: {n}\r\n\r\n"))).unwrap_err()
+        };
+        assert!(err(MAX_BODY).contains("fill whole buffer"));
+        assert_eq!(
+            err(MAX_BODY + 1),
+            format!(
+                "Content-Length {} が上限の {MAX_BODY} を超えます",
+                MAX_BODY + 1
+            )
+        );
+        assert!(err(99_999_999_999_999_999).contains("上限"));
     }
 
     fn drain(text: String) -> Vec<Result<Value, LspError>> {
