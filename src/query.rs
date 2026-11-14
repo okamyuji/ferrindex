@@ -268,14 +268,22 @@ pub(crate) fn cached<K: Eq + Hash, V>(
 }
 
 /// 出力は 1 行 1 件で端末にも出るので、パスや名前の改行、ESC などの制御文字は文字列に置き換える。
+/// C1 制御文字（CSI の U+009B など）と、表示の順を入れ替える双方向の制御文字も置き換える。
+/// UTF-8 として壊れたバイトはそのまま出す。
 pub(crate) fn escape_control(path: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(path.len());
-    for &b in path {
-        match b {
-            b'\n' => out.extend_from_slice(b"\\n"),
-            0..0x20 | 0x7f => out.extend(format!("\\x{b:02x}").bytes()),
-            _ => out.push(b),
+    for chunk in path.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            match c {
+                '\n' => out.extend_from_slice(b"\\n"),
+                '\0'..'\u{20}' | '\u{7f}' => out.extend(format!("\\x{:02x}", c as u32).bytes()),
+                '\u{80}'..='\u{9f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {
+                    out.extend(format!("\\u{{{:x}}}", c as u32).bytes());
+                }
+                _ => out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+            }
         }
+        out.extend_from_slice(chunk.invalid());
     }
     out
 }
@@ -734,6 +742,23 @@ mod tests {
         );
         assert_eq!(escape_control(b" ~\x80\xe3"), b" ~\x80\xe3");
         assert_eq!(escape_control("日本.rs".as_bytes()), "日本.rs".as_bytes());
+    }
+
+    #[test]
+    fn escape_control_covers_c1_and_bidi_controls() {
+        let esc = |s: &str| String::from_utf8(escape_control(s.as_bytes())).unwrap();
+        assert_eq!(esc("a\u{80}\u{9b}\u{9f}b"), "a\\u{80}\\u{9b}\\u{9f}b");
+        assert_eq!(
+            esc("\u{202a}\u{202e}\u{2066}\u{2069}"),
+            "\\u{202a}\\u{202e}\\u{2066}\\u{2069}"
+        );
+        // 範囲のすぐ外の文字はそのまま。
+        assert_eq!(
+            esc("\u{7e}\u{a0}\u{2029}\u{202f}\u{2065}\u{206a}"),
+            "\u{7e}\u{a0}\u{2029}\u{202f}\u{2065}\u{206a}"
+        );
+        // 壊れた UTF-8 の後ろでも見つける。
+        assert_eq!(escape_control(b"\xff\xc2\x9b"), b"\xff\\u{9b}");
     }
 
     #[test]
