@@ -182,6 +182,18 @@ fn contains_ignore_ascii_case_cases() {
 }
 
 #[test]
+fn empty_needle_matches_every_name() {
+    assert!(contains_ignore_ascii_case(b"abc", b""));
+    assert!(contains_ignore_ascii_case(b"", b""));
+    let (_d, p) = written(&sample());
+    let ix = Index::open(&p).unwrap();
+    assert_eq!(
+        ix.names_containing(b"", 2),
+        [b"Alpha".to_vec(), b"run".to_vec()]
+    );
+}
+
+#[test]
 fn duplicate_paths_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let files = [entry("a", vec![]), entry("a", vec![])];

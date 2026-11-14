@@ -210,8 +210,11 @@ fn assemble(fp: u64, version: u32, s: &[Vec<u8>; SECTION_COUNT]) -> Vec<u8> {
 }
 
 pub fn contains_ignore_ascii_case(hay: &[u8], needle: &[u8]) -> bool {
-    hay.windows(needle.len())
-        .any(|w| w.eq_ignore_ascii_case(needle))
+    // windows(0) は panic する
+    needle.is_empty()
+        || hay
+            .windows(needle.len())
+            .any(|w| w.eq_ignore_ascii_case(needle))
 }
 
 pub fn write_index(path: &Path, files: &[FileEntry]) -> io::Result<()> {
