@@ -892,7 +892,10 @@ fn supers_of_a_nested_class_give_only_its_own_bases() {
     let o = r.run(&["supers", "X", "--limit", "1"]);
     assert_eq!(
         (o.lines(), o.err.as_str()),
-        (vec!["n.py:4:13 inherit in X\tclass X(Base1): pass"], "… 1 more\n")
+        (
+            vec!["n.py:4:13 inherit in X\tclass X(Base1): pass"],
+            "… 1 more\n"
+        )
     );
     // サーバーの答えが Left.X の基底 Base1 だけなら、名前一致に戻らない。
     let o = precise_py(
@@ -1002,3 +1005,24 @@ fn name_match_still_answers_when_the_trust_list_is_unreadable() {
     assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"]);
 }
 
+/// 上限を超えた行は整形せずに数える。1 行に参照が並ぶファイルで、数を 4 倍にしても時間は
+/// ほぼ 4 倍に収まる（全件を整形すると行の長さとの積で 16 倍になる）。
+#[test]
+fn refs_beyond_the_limit_are_counted_without_rendering() {
+    let time = |n: usize| {
+        let r = Repo::new();
+        r.write("a.js", &format!("function x(){{}}{}", "x();".repeat(n)));
+        assert_eq!(r.run(&["update"]).code, 0);
+        let start = std::time::Instant::now();
+        let o = r.run(&["refs", "x", "--limit", "1"]);
+        let took = start.elapsed();
+        assert_eq!(o.lines().len(), 1);
+        assert_eq!(o.err, format!("… {} more\n", n - 1));
+        took
+    };
+    time(1000);
+    let small = time(5000);
+    let large = time(20000);
+    // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
+    assert!(large < small * 8, "{small:?} -> {large:?}");
+}

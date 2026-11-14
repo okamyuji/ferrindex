@@ -599,21 +599,25 @@ fn refs(
 ) -> Res {
     let files: Vec<Vec<u8>> = view.files().into_iter().map(|(p, _)| p).collect();
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let mut lines = Vec::new();
-    let mut next = 0;
-    while next < files.len() && lines.len() < limit {
+    let (mut lines, mut count, mut next) = (Vec::new(), 0, 0);
+    while next < files.len() && count < limit {
         let end = files.len().min(next + threads * FILES_PER_THREAD);
-        lines.extend(scan_chunk(ctx, &files[next..end], name, threads)?);
+        for (path, src, found) in scan_chunk(ctx, &files[next..end], name, threads)? {
+            // 上限を超えた分は整形せずに数える。整形は行ごとにソース行を写すので重い。
+            let room = limit.saturating_sub(lines.len());
+            lines.extend(
+                found
+                    .iter()
+                    .take(room)
+                    .map(|r| render(ctx, &Hit::new(path, r), Some(&src))),
+            );
+            count += found.len();
+        }
         next = end;
     }
     // 読んだ塊の中の超過行は数えない。残りのファイルがあるとき、件数は下限にしかならない。
     let unread = next < files.len();
-    let total = if unread {
-        limit.min(lines.len())
-    } else {
-        lines.len()
-    };
-    lines.truncate(limit);
+    let total = if unread { limit.min(count) } else { count };
     let found = emit(out, err, &lines, total)?;
     if unread {
         writeln!(err, "… more files may match")?;
@@ -621,40 +625,49 @@ fn refs(
     Ok(found)
 }
 
-/// `files` の参照行を、経路順のまま返す。読めないファイルがあれば、経路順で最初のものの失敗。
-fn scan_chunk(ctx: &Ctx, files: &[Vec<u8>], name: &str, threads: usize) -> Res<Vec<Vec<u8>>> {
+/// ファイルの（パス、内容、名前の参照）。
+type FileRefs<'a> = (&'a [u8], Vec<u8>, Vec<Ref>);
+
+/// 名前の参照を持つファイルを経路順のまま返す。読めないファイルがあれば、
+/// 経路順で最初のものの失敗。
+fn scan_chunk<'a>(
+    ctx: &Ctx,
+    files: &'a [Vec<u8>],
+    name: &str,
+    threads: usize,
+) -> Res<Vec<FileRefs<'a>>> {
     let per = files.len().div_ceil(threads).max(1);
     std::thread::scope(|s| {
         let handles: Vec<_> = files
             .chunks(per)
             .map(|part| {
                 s.spawn(move || {
-                    let mut lines = Vec::new();
+                    let mut found = Vec::new();
                     for p in part {
-                        lines.extend(scan_file(ctx, p, name)?);
+                        if let Some((src, refs)) = scan_file(ctx, p, name)? {
+                            found.push((&p[..], src, refs));
+                        }
                     }
-                    Res::Ok(lines)
+                    Res::Ok(found)
                 })
             })
             .collect();
-        let mut lines = Vec::new();
+        let mut found = Vec::new();
         for h in handles {
-            lines.extend(h.join().expect("scan thread panicked")?);
+            found.extend(h.join().expect("scan thread panicked")?);
         }
-        Ok(lines)
+        Ok(found)
     })
 }
 
-fn scan_file(ctx: &Ctx, path: &[u8], name: &str) -> Res<Vec<Vec<u8>>> {
+fn scan_file(ctx: &Ctx, path: &[u8], name: &str) -> Res<Option<(Vec<u8>, Vec<Ref>)>> {
     let Some((lang, src)) = candidate(ctx, path, name.as_bytes())? else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     let defs = extract(lang, &src);
-    Ok(extract_refs(lang, &src, &defs)
-        .iter()
-        .filter(|r| r.name == name)
-        .map(|r| render(ctx, &Hit::new(path, r), Some(&src)))
-        .collect())
+    let mut refs = extract_refs(lang, &src, &defs);
+    refs.retain(|r| r.name == name);
+    Ok((!refs.is_empty()).then_some((src, refs)))
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
