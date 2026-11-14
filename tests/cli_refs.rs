@@ -1054,3 +1054,48 @@ fn precise_drops_answers_that_leave_the_root_through_a_symlink() {
         ]
     );
 }
+
+#[test]
+fn precise_skips_answered_files_that_no_longer_exist() {
+    let r = repo();
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["a.rs", 3, 4], ["gone.rs", 0, 0]]"#)],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["a.rs:4:5 call in caller_fn\ttarget();"]);
+}
+
+/// `refs` は経路順に（コア数 × 16）個ずつファイルを読む。
+fn chunk_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// 経路順で `at` 番目のファイルだけが target を呼ぶ、`total` 個のファイルの作業ツリー。
+fn files_calling_target_at(total: usize, at: &[usize]) -> Repo {
+    let r = Repo::new();
+    for i in 0..total {
+        let body = if at.contains(&i) { "target();" } else { "" };
+        r.write(&format!("f{i:04}.rs"), &format!("fn f() {{ {body} }}\n"));
+    }
+    r
+}
+
+#[test]
+fn refs_stop_after_the_chunk_that_reaches_the_limit() {
+    let chunk = chunk_threads() * 16;
+    let r = files_calling_target_at(chunk + 2, &[0, chunk + 1]);
+    let o = r.run(&["refs", "target", "--limit", "1"]);
+    assert_eq!(o.lines().len(), 1);
+    assert_eq!(o.err, "… more files may match\n");
+}
+
+#[test]
+fn refs_read_core_count_times_16_files_per_chunk() {
+    let threads = chunk_threads();
+    let total = threads * 16;
+    let r = files_calling_target_at(total, &[0, (threads + 16).min(total - 1)]);
+    let o = r.run(&["refs", "target", "--limit", "2"]);
+    assert_eq!((o.lines().len(), o.err.as_str()), (2, ""));
+}
