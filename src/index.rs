@@ -377,19 +377,17 @@ impl Index {
         })
     }
 
-    /// 名前に `needle` を含むもの（ASCII の大小は無視）を名前の昇順で最大 `max` 件返す。
-    /// `max` 件に達したら走査をやめる。
-    pub fn names_containing(&self, needle: &[u8], max: usize) -> Vec<Vec<u8>> {
+    /// 名前に `needle` を含むもの（ASCII の大小は無視）を名前の昇順で返す。
+    pub fn names_containing<'a>(&'a self, needle: &'a [u8]) -> impl Iterator<Item = Vec<u8>> + 'a {
         let mut stream = self.names.stream();
-        let mut out = Vec::new();
-        while out.len() < max
-            && let Some((name, _)) = stream.next()
-        {
-            if contains_ignore_ascii_case(name, needle) {
-                out.push(name.to_vec());
+        std::iter::from_fn(move || {
+            while let Some((name, _)) = stream.next() {
+                if contains_ignore_ascii_case(name, needle) {
+                    return Some(name.to_vec());
+                }
             }
-        }
-        out
+            None
+        })
     }
 
     /// 区画ごとのバイト数（ヘッダを除く）。

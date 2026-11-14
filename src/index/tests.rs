@@ -162,15 +162,13 @@ fn section_bytes_plus_header_is_the_file_size() {
 }
 
 #[test]
-fn names_containing_ignores_ascii_case_and_stops_at_max() {
+fn names_containing_ignores_ascii_case() {
     let (_d, p) = written(&sample());
     let ix = Index::open(&p).unwrap();
-    let got = |needle: &str, max| ix.names_containing(needle.as_bytes(), max);
-    assert_eq!(got("A", 10), [b"Alpha".to_vec(), b"zeta".to_vec()]);
-    assert_eq!(got("a", 1), [b"Alpha".to_vec()]);
-    assert_eq!(got("RUN", 10), [b"run".to_vec()]);
-    assert!(got("a", 0).is_empty());
-    assert!(got("none", 10).is_empty());
+    let got = |needle: &str| ix.names_containing(needle.as_bytes()).collect::<Vec<_>>();
+    assert_eq!(got("A"), [b"Alpha".to_vec(), b"zeta".to_vec()]);
+    assert_eq!(got("RUN"), [b"run".to_vec()]);
+    assert!(got("none").is_empty());
 }
 
 #[test]
@@ -188,8 +186,8 @@ fn empty_needle_matches_every_name() {
     let (_d, p) = written(&sample());
     let ix = Index::open(&p).unwrap();
     assert_eq!(
-        ix.names_containing(b"", 2),
-        [b"Alpha".to_vec(), b"run".to_vec()]
+        ix.names_containing(b"").collect::<Vec<_>>(),
+        [b"Alpha".to_vec(), b"run".to_vec(), b"zeta".to_vec()]
     );
 }
 

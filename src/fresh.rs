@@ -354,15 +354,26 @@ impl View {
     }
 
     /// 名前に `needle` を含む定義（ASCII の大小は無視）。名前は `MAX_SUBSTRING_NAMES` 種類まで。
+    /// 上限には、差分区画で隠れた名前や定義の無い名前（包含元だけの名前）を数えない。
     pub fn lookup_substring(&self, needle: &[u8]) -> Result<Vec<Found>, Corrupt> {
-        let names: std::collections::BTreeSet<Vec<u8>> = self
+        let mut names: Vec<_> = self
             .parts()
             .into_iter()
-            .flat_map(|(_, idx)| idx.names_containing(needle, MAX_SUBSTRING_NAMES))
+            .map(|(_, idx)| idx.names_containing(needle).peekable())
             .collect();
-        let mut out = Vec::new();
-        for name in names.into_iter().take(MAX_SUBSTRING_NAMES) {
-            out.extend(self.lookup(&name)?);
+        let (mut out, mut taken) = (Vec::new(), 0);
+        while taken < MAX_SUBSTRING_NAMES {
+            let Some(name) = names.iter_mut().filter_map(|n| n.peek()).min().cloned() else {
+                break;
+            };
+            for n in &mut names {
+                if n.peek() == Some(&name) {
+                    n.next();
+                }
+            }
+            let hits = self.lookup(&name)?;
+            taken += usize::from(!hits.is_empty());
+            out.extend(hits);
         }
         out.sort_by(|a, b| (&a.path, a.line, a.col).cmp(&(&b.path, b.line, b.col)));
         Ok(out)

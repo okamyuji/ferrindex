@@ -590,3 +590,40 @@ fn unreadable_file_fails_the_refresh_and_keeps_the_index() {
     assert!(matches!(err, Err(Error::Io(_))));
     assert_eq!(found(&run(&e), "secret").len(), 1);
 }
+
+fn many_fns(prefix: &str) -> String {
+    (0..MAX_SUBSTRING_NAMES)
+        .map(|i| format!("fn {prefix}_{i:03}() {{}}\n"))
+        .collect()
+}
+
+#[test]
+fn substring_limit_counts_names_that_survive_the_overlay() {
+    let e = env();
+    for i in 0..12 {
+        put(&e, &format!("f{i}.rs"), &format!("fn pad{i}() {{}}\n"));
+    }
+    put(&e, "a.rs", &many_fns("needle"));
+    put(&e, "z.rs", "fn needle_z() {}\n");
+    run(&e);
+    put(&e, "a.rs", "fn other() {}\n");
+    let v = run(&e);
+    assert!(v.delta.is_some(), "the edit must stay in the delta");
+    let hits = v.lookup_substring(b"needle").unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].name, b"needle_z");
+}
+
+#[test]
+fn substring_limit_skips_names_without_definitions() {
+    let e = env();
+    let impls: String = (0..MAX_SUBSTRING_NAMES)
+        .map(|i| format!("impl needle_{i:03} {{ fn m{i}() {{}} }}\n"))
+        .collect();
+    put(&e, "a.rs", &impls);
+    put(&e, "z.rs", "fn needle_z() {}\n");
+    let v = run(&e);
+    assert!(v.lookup(b"needle_000").unwrap().is_empty());
+    let hits = v.lookup_substring(b"needle").unwrap();
+    assert!(hits.iter().any(|h| h.name == b"needle_z"), "{hits:?}");
+}
