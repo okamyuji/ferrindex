@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::HashSet;
 
-use tree_sitter::{Parser, TreeCursor};
+use tree_sitter::{Node, Parser, TreeCursor};
 
 use crate::extract::Def;
 use crate::lang::{Lang, tags_config};
@@ -24,6 +24,7 @@ pub struct Ref {
 
 /// 分類のために見る祖先の段数。入れ子が深い入力でも一つの参照の分類を定数時間にする。
 const CLASSIFY_DEPTH: usize = 3;
+const IMPL_TRAIT_DEPTH: usize = 3;
 /// ブロックや無名関数の引数と中身は、外側の call の一部ではない。
 const SCOPE_WORDS: [&str; 5] = ["block", "lambda", "closure", "parameter", "arrow_function"];
 const CALL_WORDS: [&str; 3] = ["call", "invocation", "send"];
@@ -79,12 +80,20 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
                 while open.last().is_some_and(|&i| defs[i].body.end <= start) {
                     open.pop();
                 }
+                let impl_item = (lang == Lang::Rust).then(|| trait_impl_of(node)).flatten();
+                let (kind, container) = match impl_item {
+                    Some(item) => (REF_INHERIT, impl_type_name(item, src)),
+                    None => (
+                        classify(&ancestors, step(&cursor, &afters)),
+                        open.last().map(|&i| defs[i].name.clone()),
+                    ),
+                };
                 refs.push(Ref {
                     name: String::from_utf8_lossy(&src[start..node.end_byte()]).into_owned(),
                     line,
                     col,
-                    kind: classify(&ancestors, step(&cursor, &afters)),
-                    container: open.last().map(|&i| defs[i].name.clone()),
+                    kind,
+                    container,
                 });
             }
         }
@@ -110,6 +119,44 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
             ancestors.pop();
             afters.pop();
         }
+    }
+}
+
+/// `impl Trait for Type` のトレイト名そのもの（`a::Tr<T>` なら `Tr`）なら、その `impl_item`。
+fn trait_impl_of(node: Node) -> Option<Node> {
+    if node.kind() != "type_identifier" {
+        return None;
+    }
+    let mut top = node;
+    // トレイトの名前は impl_item の直下から数段のパスとジェネリクスの中にしか入らない
+    for _ in 0..IMPL_TRAIT_DEPTH {
+        let parent = top.parent()?;
+        if parent.kind() == "impl_item" {
+            let named = last_type_name(parent.child_by_field_name("trait")?)?;
+            return (named.id() == node.id()).then_some(parent);
+        }
+        top = parent;
+    }
+    None
+}
+
+/// `impl` の型の名前。パスとジェネリクスは最後の名前だけを見る。
+fn impl_type_name(item: Node, src: &[u8]) -> Option<String> {
+    let name = last_type_name(item.child_by_field_name("type")?)?;
+    std::str::from_utf8(&src[name.byte_range()])
+        .ok()
+        .map(str::to_string)
+}
+
+/// `a::b::Tr<T>` の `Tr`。これ以外の型（参照、タプルなど）は名前を持たない。
+fn last_type_name(mut node: Node) -> Option<Node> {
+    loop {
+        node = match node.kind() {
+            "generic_type" => node.child_by_field_name("type")?,
+            "scoped_type_identifier" => node.child_by_field_name("name")?,
+            "type_identifier" => return Some(node),
+            _ => return None,
+        };
     }
 }
 

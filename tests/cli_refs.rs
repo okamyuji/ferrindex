@@ -205,3 +205,50 @@ fn refs_keep_path_order_across_parallel_batches() {
     let all = r.run(&["refs", "target", "--limit", "1000"]);
     assert_eq!((all.lines().len(), all.err.as_str()), (1000, ""));
 }
+
+const RUST_IMPLS: &str = "trait Tr {}
+struct X;
+struct G<T>(T);
+impl Tr for X {
+    fn f(&self) {}
+}
+impl<T> Tr for G<T> {}
+";
+
+#[test]
+fn rust_impls_and_supers_follow_impl_trait_for() {
+    let r = Repo::new();
+    r.write("a.rs", RUST_IMPLS);
+    let o = r.run(&["impls", "Tr"]);
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:6 inherit in X\timpl Tr for X {",
+            "a.rs:7:9 inherit in G\timpl<T> Tr for G<T> {}"
+        ]
+    );
+    let o = r.run(&["supers", "G"]);
+    assert_eq!(o.lines(), ["a.rs:7:9 inherit in G\timpl<T> Tr for G<T> {}"]);
+    assert_eq!(r.run(&["supers", "Tr"]).code, 1);
+}
+
+#[test]
+fn go_impls_and_supers_ask_for_precise() {
+    let r = Repo::new();
+    r.write(
+        "a.go",
+        "package a\n\ntype Reader interface {\n\tRead()\n}\n\ntype F struct{}\n",
+    );
+    for args in [["impls", "Reader"], ["supers", "F"]] {
+        let o = r.run(&args);
+        assert_eq!(o.code, 1, "{args:?}");
+        assert_eq!(o.out, "");
+        assert_eq!(
+            o.err,
+            "ferrindex: Go のインターフェースの実装は名前一致では分かりません。--precise を使ってください\n"
+        );
+    }
+    // callers は Go でも名前一致で答えられる
+    r.write("b.go", "package a\n\nfunc g() {\n\tx.Read()\n}\n");
+    assert_eq!(r.run(&["callers", "Read"]).code, 0);
+}

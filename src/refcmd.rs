@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::extract::extract;
-use crate::fresh::{View, is_binary};
+use crate::fresh::{Found, View, is_binary};
 use crate::lang::{Lang, lang_of};
 use crate::query::{Ctx, Res, corrupt, emit, escape_control, resolve, source_line};
 use crate::refs::{REF_CALL, REF_INHERIT, Ref, extract_refs};
@@ -58,10 +58,30 @@ pub(crate) fn run(
     let name = last_segment(term);
     match kind {
         RefKind::Callers => indexed(ctx, view, &name, REF_CALL, limit, out, err),
-        RefKind::Impls => indexed(ctx, view, &name, REF_INHERIT, limit, out, err),
-        RefKind::Supers => supers(ctx, view, term, limit, out, err),
         RefKind::Refs => refs(ctx, view, &name, limit, out, err),
+        RefKind::Impls | RefKind::Supers => {
+            let defs = resolve(view, term).map_err(|c| corrupt(c, ctx))?;
+            if only_go(&defs) {
+                writeln!(err, "{GO_NEEDS_PRECISE}")?;
+                Ok(false)
+            } else if kind == RefKind::Supers {
+                supers(ctx, defs, limit, out, err)
+            } else {
+                indexed(ctx, view, &name, REF_INHERIT, limit, out, err)
+            }
+        }
     }
+}
+
+const GO_NEEDS_PRECISE: &str =
+    "ferrindex: Go のインターフェースの実装は名前一致では分かりません。--precise を使ってください";
+
+/// Go は型がインターフェースを暗黙に満たすので、名前では継承の関係が分からない。
+fn only_go(defs: &[Found]) -> bool {
+    !defs.is_empty()
+        && defs
+            .iter()
+            .all(|d| lang_of(Path::new(OsStr::from_bytes(&d.path))) == Some(Lang::Go))
 }
 
 /// `Foo.bar` と `Foo::bar` は `bar` を探す。`resolve` と同じ分け方にする。
@@ -137,13 +157,11 @@ fn indexed(
 /// 定義のファイルを今の内容で取り直し、定義の名前を囲みに持つ継承参照を出す。
 fn supers(
     ctx: &Ctx,
-    view: &View,
-    term: &str,
+    defs: Vec<Found>,
     limit: usize,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> Res {
-    let defs = resolve(view, term).map_err(|c| corrupt(c, ctx))?;
     let mut seen = HashSet::new();
     let mut lines = Vec::new();
     for d in defs {

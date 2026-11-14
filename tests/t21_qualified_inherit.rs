@@ -42,3 +42,37 @@ fn cpp_qualified_base_inherits_only_the_last_name() {
     let got = names(Lang::Cpp, "class A : public ns::B {};\n");
     assert_eq!(got, [("ns".into(), REF_PLAIN), ("B".into(), REF_INHERIT)]);
 }
+
+#[test]
+fn rust_impl_trait_names_the_trait_as_inheritance_of_the_type() {
+    let src = "trait Tr {}\nstruct X;\nstruct G<T>(T);\nimpl Tr for X {}\nimpl<T> Tr for G<T> {}\nimpl a::b::Tr for crate::m::X {}\nimpl X {}\n";
+    let defs = extract(Lang::Rust, src.as_bytes());
+    let got: Vec<(String, u8, u32, Option<String>)> =
+        extract_refs(Lang::Rust, src.as_bytes(), &defs)
+            .into_iter()
+            .filter(|r| r.kind == REF_INHERIT)
+            .map(|r| (r.name, r.kind, r.line, r.container))
+            .collect();
+    assert_eq!(
+        got,
+        [
+            ("Tr".into(), REF_INHERIT, 4, Some("X".into())),
+            ("Tr".into(), REF_INHERIT, 5, Some("G".into())),
+            ("Tr".into(), REF_INHERIT, 6, Some("X".into())),
+        ]
+    );
+}
+
+#[test]
+fn rust_trait_arguments_and_path_segments_stay_plain() {
+    let got = names(Lang::Rust, "impl a::Conv<Y> for X {}\n");
+    assert_eq!(
+        got,
+        [
+            ("a".into(), REF_PLAIN),
+            ("Conv".into(), REF_INHERIT),
+            ("Y".into(), REF_PLAIN),
+            ("X".into(), REF_PLAIN)
+        ]
+    );
+}
