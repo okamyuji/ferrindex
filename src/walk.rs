@@ -67,15 +67,9 @@ fn io_failure(e: &ignore::Error) -> Option<io::Error> {
 }
 
 fn scanned(root: &Path, entry: &ignore::DirEntry) -> io::Result<Option<Scanned>> {
-    if !entry.file_type().is_some_and(|t| t.is_file()) {
-        return Ok(None);
-    }
-    let meta = match entry.metadata() {
-        Ok(m) => m,
-        Err(e) => return io_failure(&e).map_or(Ok(None), Err),
-    };
     // ignore は .gitignore の I/O エラーを捨てる（ignore-0.4.34 lib.rs の push_ignore_io）。
-    // 読めないまま進むと除外規則が抜けたファイルを索引に入れてしまう
+    // 読めないまま進むと除外規則が抜けたファイルを索引に入れてしまう。
+    // ignore は symlink の .gitignore も辿って開くので、種類を問わず確かめる
     if entry.file_name() == ".gitignore"
         && let Err(e) = File::open(entry.path())
         && e.kind() != io::ErrorKind::NotFound
@@ -85,6 +79,13 @@ fn scanned(root: &Path, entry: &ignore::DirEntry) -> io::Result<Option<Scanned>>
             format!("{}: {e}", entry.path().display()),
         ));
     }
+    if !entry.file_type().is_some_and(|t| t.is_file()) {
+        return Ok(None);
+    }
+    let meta = match entry.metadata() {
+        Ok(m) => m,
+        Err(e) => return io_failure(&e).map_or(Ok(None), Err),
+    };
     if meta.len() > MAX_FILE_BYTES {
         return Ok(None);
     }
@@ -257,6 +258,20 @@ mod tests {
         fs::set_permissions(&gi, fs::Permissions::from_mode(0o000)).unwrap();
         let got = scan(t.path());
         fs::set_permissions(&gi, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn unreadable_symlinked_gitignore_is_an_error() {
+        use std::{io, os::unix::fs::PermissionsExt};
+        let t = repo();
+        put(t.path(), "sub/s.rs", b"");
+        put(t.path(), "real.ign", b"sub/\n");
+        std::os::unix::fs::symlink("real.ign", t.path().join(".gitignore")).unwrap();
+        let real = t.path().join("real.ign");
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o000)).unwrap();
+        let got = scan(t.path());
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(got.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 

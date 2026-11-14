@@ -157,7 +157,7 @@ fn incremental(
     let Ok(main) = Index::open(&main_path) else {
         return Ok(None);
     };
-    let old_delta = if delta_path.exists() {
+    let old_delta = if delta_path.try_exists()? {
         let Ok(d) = Index::open(&delta_path) else {
             return Ok(None);
         };
