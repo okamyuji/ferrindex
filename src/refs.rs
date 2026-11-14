@@ -24,6 +24,8 @@ pub struct Ref {
 
 /// 分類のために見る祖先の段数。入れ子が深い入力でも一つの参照の分類を定数時間にする。
 const CLASSIFY_DEPTH: usize = 3;
+/// ブロックや無名関数の引数と中身は、外側の call の一部ではない。
+const SCOPE_WORDS: [&str; 5] = ["block", "lambda", "closure", "parameter", "arrow_function"];
 const CALL_WORDS: [&str; 3] = ["call", "invocation", "send"];
 const INHERIT_WORDS: [&str; 10] = [
     "superclass",
@@ -167,6 +169,9 @@ fn classify(ancestors: &[Step], leaf: Step) -> u8 {
         }
         if INHERIT_WORDS.iter().any(|w| a.kind.contains(w)) {
             return REF_INHERIT;
+        }
+        if SCOPE_WORDS.iter().any(|w| a.kind.contains(w)) {
+            return REF_PLAIN;
         }
         below = *a;
     }

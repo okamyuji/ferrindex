@@ -307,3 +307,42 @@ fn ruby_method_names_in_chains_are_calls() {
         assert_eq!(kind_of("c"), REF_CALL, "{src}");
     }
 }
+
+#[test]
+fn identifiers_inside_blocks_and_callbacks_are_not_calls() {
+    let cases = [
+        (
+            Lang::Ruby,
+            "def g(a)\n  a.each do |follow|\n    follow.save\n  end\nend\n",
+            [
+                ("follow", REF_PLAIN),
+                ("save", REF_CALL),
+                ("each", REF_CALL),
+            ],
+        ),
+        (
+            Lang::JavaScript,
+            "function g(arr) { arr.map(x => x.y()); }\n",
+            [("x", REF_PLAIN), ("y", REF_CALL), ("map", REF_CALL)],
+        ),
+        (
+            Lang::Python,
+            "def g(xs):\n    list(map(lambda v: v.strip(), xs))\n",
+            [("v", REF_PLAIN), ("strip", REF_CALL), ("map", REF_CALL)],
+        ),
+    ];
+    for (lang, src, want) in cases {
+        let k = kinds(lang, src);
+        for (name, kind) in want {
+            let all: Vec<u8> = k
+                .iter()
+                .filter(|(m, _)| m == name)
+                .map(|(_, c)| *c)
+                .collect();
+            assert!(
+                !all.is_empty() && all.iter().all(|&c| c == kind),
+                "{lang:?} {name} {all:?}"
+            );
+        }
+    }
+}
