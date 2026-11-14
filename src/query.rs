@@ -14,6 +14,7 @@ use crate::fresh::{self, Found, View, is_binary};
 use crate::index::contains_ignore_ascii_case;
 use crate::lang::{kind_name, lang_of};
 use crate::store::find_root;
+use crate::walk::MAX_FILE_BYTES;
 
 const EXIT_NONE: u8 = 1;
 const EXIT_USAGE: u8 = 2;
@@ -374,11 +375,15 @@ fn more(err: &mut impl Write, rest: usize) -> io::Result<()> {
 }
 
 /// FIFO などを開くと書き手が現れるまで止まるので、読む前に通常ファイルだと確かめる。
+/// 大きさの上限は索引と同じにする。
 fn read_regular(file: &Path) -> Res<Vec<u8>> {
     let io = |e: &dyn Display| Fail::io(format!("{}: {e}", file.display()));
     let meta = fs::metadata(file).map_err(|e| io(&e))?;
     if !meta.is_file() {
         return Err(io(&"not a regular file"));
+    }
+    if meta.len() > MAX_FILE_BYTES {
+        return Err(io(&format!("larger than {MAX_FILE_BYTES} bytes")));
     }
     fs::read(file).map_err(|e| io(&e))
 }

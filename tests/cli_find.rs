@@ -216,3 +216,19 @@ fn outline_rejects_non_regular_files_without_blocking() {
         assert!(err.contains("not a regular file"), "{err}");
     }
 }
+
+#[test]
+fn outline_caps_input_at_the_index_size_limit() {
+    let t = tempfile::tempdir().unwrap();
+    let limit = 1usize << 20;
+    let pad = |n: usize| format!("fn f() {{}}\n{}", "/".repeat(n - 10));
+    std::fs::write(t.path().join("exact.rs"), pad(limit)).unwrap();
+    std::fs::write(t.path().join("over.rs"), pad(limit + 1)).unwrap();
+    let xdg = t.path().join("xdg");
+    let exact = common::run_at(t.path(), &xdg, &["outline", "exact.rs"]);
+    assert_eq!(exact.lines(), ["exact.rs:1:4 function f"]);
+    let over = common::run_at(t.path(), &xdg, &["outline", "over.rs"]);
+    assert_eq!(over.code, 4, "{}", over.err);
+    assert_eq!(over.err.lines().count(), 1, "{}", over.err);
+    assert!(over.err.contains("1048576"), "{}", over.err);
+}
