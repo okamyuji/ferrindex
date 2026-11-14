@@ -77,9 +77,15 @@ const CSHARP_EXTRA: &str = "\
 /// 先に当たるよう、tags.scm の前に置く。
 const GO_EXTRA: &str = "(type_alias name: (type_identifier) @name) @definition.type";
 
+/// Java の tags.scm は class、interface、method しか捕捉しない。
+const JAVA_EXTRA: &str = "\
+(enum_declaration name: (identifier) @name) @definition.class
+(record_declaration name: (identifier) @name) @definition.class
+(annotation_type_declaration name: (identifier) @name) @definition.class";
+
 /// 追加した query の全文。索引の指紋の入力にする。
 pub fn extra_queries() -> String {
-    format!("{CSHARP_EXTRA}\n{GO_EXTRA}")
+    format!("{CSHARP_EXTRA}\n{GO_EXTRA}\n{JAVA_EXTRA}")
 }
 
 static CONFIGS: [OnceLock<TagsConfiguration>; Lang::ALL.len()] =
@@ -125,7 +131,7 @@ fn build(lang: Lang) -> TagsConfiguration {
         ),
         Lang::Java => (
             tree_sitter_java::LANGUAGE.into(),
-            tree_sitter_java::TAGS_QUERY.into(),
+            format!("{}\n{JAVA_EXTRA}", tree_sitter_java::TAGS_QUERY),
         ),
         Lang::C => (
             tree_sitter_c::LANGUAGE.into(),
@@ -222,7 +228,11 @@ mod tests {
     #[test]
     fn extra_queries_feed_the_index_fingerprint() {
         let all = extra_queries();
-        assert!(all.contains(CSHARP_EXTRA) && all.contains(GO_EXTRA));
+        assert!(
+            [CSHARP_EXTRA, GO_EXTRA, JAVA_EXTRA]
+                .iter()
+                .all(|q| all.contains(q))
+        );
     }
 
     #[test]

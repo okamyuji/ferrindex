@@ -304,6 +304,32 @@ fn csharp_defs_and_bodies() {
 }
 
 #[test]
+fn java_enums_records_and_annotation_types_are_classes() {
+    let r = rows("java/Types.java");
+    check(
+        row(&r, "Mode"),
+        "class",
+        4,
+        Some("Types"),
+        "public enum Mode {\n        A, B\n    }",
+    );
+    check(
+        row(&r, "Pair"),
+        "class",
+        8,
+        Some("Types"),
+        "public record Pair(int a, int b) {}",
+    );
+    check(
+        row(&r, "Marker"),
+        "class",
+        10,
+        Some("Types"),
+        "public @interface Marker {}",
+    );
+}
+
+#[test]
 fn csharp_local_functions_belong_to_the_enclosing_type() {
     let r = rows("csharp/Local.cs");
     check(
