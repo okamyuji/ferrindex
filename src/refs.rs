@@ -30,6 +30,8 @@ const CLASSIFY_DEPTH: usize = 3;
 const IMPL_TRAIT_DEPTH: usize = 3;
 /// 分類のときに数えずに飛ばす括弧の数の上限。
 const PAREN_SKIP: usize = 16;
+/// マクロの中の `f::<…>(` で数える山括弧の入れ子の上限。
+const TURBOFISH_DEPTH: usize = 16;
 /// ブロックや無名関数の引数と中身は、外側の call の一部ではない。Rust の `'static` の `static` は
 /// 識別子の葉だが、型でも呼び出しでもないので、`lifetime` の中も外側の文脈を受け継がない。
 const SCOPE_WORDS: [&str; 6] = [
@@ -206,13 +208,36 @@ fn kind_of(ancestors: &[Step], leaf: Step, rest: &[u8]) -> u8 {
 }
 
 /// マクロの token tree は中の呼び出しを call_expression にせず字句を平たく並べるので、名前の
-/// 後ろの字句で見分ける。`f(` と、入れ子のマクロの `m!(`、`m![`、`m!{` を呼び出しとする。
+/// 後ろの字句で見分ける。`f(` と `f::<T>(`、入れ子のマクロの `m!(`、`m![`、`m!{` を呼び出しとする。
 fn call_follows(rest: &[u8]) -> bool {
-    match rest.trim_ascii_start().split_first() {
+    let rest = rest.trim_ascii_start();
+    let rest = after_turbofish(rest).map_or(rest, <[u8]>::trim_ascii_start);
+    match rest.split_first() {
         Some((b'(', _)) => true,
         Some((b'!', after)) => matches!(after.trim_ascii_start().first(), Some(b'(' | b'[' | b'{')),
         _ => false,
     }
+}
+
+/// `::<…>` の後ろ。山括弧が閉じないか、入れ子が上限を超えれば None。`->` の `>` は数えない。
+/// 上限で、閉じない `<` が続く入力でも一つの名前に費やす走査を止める。
+fn after_turbofish(rest: &[u8]) -> Option<&[u8]> {
+    let mut rest = rest
+        .strip_prefix(b"::")?
+        .trim_ascii_start()
+        .strip_prefix(b"<")?;
+    let (mut depth, mut prev) = (1, b'<');
+    while depth > 0 {
+        let (&b, tail) = rest.split_first()?;
+        match b {
+            b'<' if depth == TURBOFISH_DEPTH => return None,
+            b'<' => depth += 1,
+            b'>' if prev != b'-' => depth -= 1,
+            _ => {}
+        }
+        (prev, rest) = (b, tail);
+    }
+    Some(rest)
 }
 
 fn is_reference_kind(kind: &str) -> bool {

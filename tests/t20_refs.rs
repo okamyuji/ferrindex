@@ -642,3 +642,38 @@ fn lua_dot_fields_stay_calls() {
     let found = kinds(Lang::Lua, "a.target()\n");
     assert_eq!(kind_of(&found, "target"), REF_CALL);
 }
+
+#[test]
+fn macro_arguments_with_a_turbofish_before_parentheses_are_calls() {
+    let src = "fn f() { assert_eq!(v.iter().collect::<Vec<_>>(), w); \
+               m!(parse :: < T > (s), boxed::<Box<dyn Fn(u8) -> u8>>(), \
+               alone::<T>, shifted::<T>> (x), stringify!(target), open::<A (x)); }\n";
+    let found = kinds(Lang::Rust, src);
+    for (name, kind) in [
+        ("collect", REF_CALL),
+        ("parse", REF_CALL),
+        ("boxed", REF_CALL),
+        // `<` が閉じないまま `(` が来ても呼び出しではない
+        ("open", REF_PLAIN),
+        ("alone", REF_PLAIN),
+        // 山括弧が閉じた直後が `(` でない
+        ("shifted", REF_PLAIN),
+        ("target", REF_PLAIN),
+    ] {
+        assert!(found.contains(&(name.into(), kind)), "{name} {found:?}");
+    }
+}
+
+#[test]
+fn turbofish_nesting_is_counted_only_up_to_a_bound() {
+    let kind = |n: usize| {
+        let src = format!(
+            "fn f() {{ m!(target::<{}T{}>()); }}\n",
+            "A<".repeat(n),
+            ">".repeat(n)
+        );
+        targets(Lang::Rust, src.as_bytes())[0].kind
+    };
+    assert_eq!(kind(15), REF_CALL);
+    assert_eq!(kind(16), REF_PLAIN);
+}
