@@ -90,18 +90,16 @@ fn containers(defs: &[Def], names: &[Range<usize>]) -> Vec<Option<String>> {
             stack.push(holders[next]);
             next += 1;
         }
+        // 自分自身は container になれないので、判定の間だけスタックから外す
+        let own = stack.pop_if(|h| *h == i);
         while stack
             .last()
             .is_some_and(|&h| defs[h].body.end < names[i].end)
         {
             stack.pop();
         }
-        // 自分自身の下にあるエントリは名前を含むとは限らないので範囲を確かめる
-        let inner = stack
-            .iter()
-            .rev()
-            .find(|&&h| h != i && names[i].end <= defs[h].body.end);
-        out[i] = inner.map(|&h| defs[h].name.clone());
+        out[i] = stack.last().map(|&h| defs[h].name.clone());
+        stack.extend(own);
     }
     out
 }
@@ -177,4 +175,71 @@ fn widen_c<'a>(decl: Node<'a>, cpp: bool) -> Option<Node<'a>> {
         Some(t) if cpp && t.kind() == "template_declaration" => t,
         _ => full,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Item<'a> = (&'a str, &'a str, Range<usize>, Range<usize>);
+
+    fn run(items: &[Item]) -> Vec<Option<String>> {
+        let defs: Vec<Def> = items
+            .iter()
+            .map(|i| Def {
+                name: i.0.into(),
+                line: 1,
+                col: 1,
+                kind: kind_id(i.1),
+                container: None,
+                body: i.2.clone(),
+            })
+            .collect();
+        let names: Vec<_> = items.iter().map(|i| i.3.clone()).collect();
+        containers(&defs, &names)
+    }
+
+    #[test]
+    fn holder_ending_exactly_at_name_end_still_contains_it() {
+        let c = run(&[("A", "class", 0..10, 0..1), ("x", "function", 5..10, 5..10)]);
+        assert_eq!(c[1].as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn holder_ending_before_the_name_does_not_contain_it() {
+        let c = run(&[
+            ("A", "class", 0..10, 0..1),
+            ("x", "function", 20..30, 25..26),
+        ]);
+        assert_eq!(c[1], None);
+    }
+
+    #[test]
+    fn holder_starting_exactly_at_name_start_contains_it() {
+        let c = run(&[("A", "class", 5..20, 5..6), ("x", "function", 5..20, 5..6)]);
+        // 同じ範囲の2定義。x は A の中、A は自分自身を除くので None
+        assert_eq!((c[0].as_deref(), c[1].as_deref()), (None, Some("A")));
+    }
+
+    #[test]
+    fn innermost_holder_wins_and_siblings_do_not_leak() {
+        let c = run(&[
+            ("A", "module", 0..100, 0..1),
+            ("B", "class", 10..40, 11..12),
+            ("C", "class", 50..90, 51..52),
+            ("m", "function", 20..30, 21..22),
+            ("n", "function", 60..70, 61..62),
+        ]);
+        let got: Vec<_> = c.iter().map(|x| x.as_deref()).collect();
+        assert_eq!(got, [None, Some("A"), Some("A"), Some("B"), Some("C")]);
+    }
+
+    #[test]
+    fn non_holder_kinds_are_never_containers() {
+        let c = run(&[
+            ("f", "function", 0..50, 0..1),
+            ("g", "function", 10..20, 11..12),
+        ]);
+        assert_eq!(c, [None, None]);
+    }
 }
