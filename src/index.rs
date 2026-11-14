@@ -11,7 +11,7 @@ use memmap2::Mmap;
 
 use crate::codec::{Corrupt, Row, decode_rows, encode_rows, key_by_rank};
 use crate::extract::Def;
-use crate::lang::EXTRA_QUERIES;
+use crate::lang::extra_queries;
 use crate::store::write_atomic;
 
 pub const LANG_DELETED: u8 = 254;
@@ -97,8 +97,9 @@ fn fingerprint() -> u64 {
         .collect::<Vec<_>>()
         .join("\n");
     let text = format!(
-        "{FORMAT_VERSION}\n{}\n{grammars}\n{EXTRA_QUERIES}",
-        env!("CARGO_PKG_VERSION")
+        "{FORMAT_VERSION}\n{}\n{grammars}\n{}",
+        env!("CARGO_PKG_VERSION"),
+        extra_queries()
     );
     // FNV-1a。衝突耐性は要らず、変更検知だけでよい
     fnv1a(text.as_bytes())

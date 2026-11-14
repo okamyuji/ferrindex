@@ -71,8 +71,14 @@ const CSHARP_EXTRA: &str = "\
 (struct_declaration name: (identifier) @name) @definition.class
 (record_declaration name: (identifier) @name) @definition.class";
 
+/// `type A = B` は tags.scm の type_spec に当たらない。同じ名前の位置を取る `@reference.type` より
+/// 先に当たるよう、tags.scm の前に置く。
+const GO_EXTRA: &str = "(type_alias name: (type_identifier) @name) @definition.type";
+
 /// 追加した query の全文。索引の指紋の入力にする。
-pub const EXTRA_QUERIES: &str = CSHARP_EXTRA;
+pub fn extra_queries() -> String {
+    format!("{CSHARP_EXTRA}\n{GO_EXTRA}")
+}
 
 static CONFIGS: [OnceLock<TagsConfiguration>; Lang::ALL.len()] =
     [const { OnceLock::new() }; Lang::ALL.len()];
@@ -109,7 +115,7 @@ fn build(lang: Lang) -> TagsConfiguration {
         Lang::JavaScript => (tree_sitter_javascript::LANGUAGE.into(), js.into()),
         Lang::Go => (
             tree_sitter_go::LANGUAGE.into(),
-            tree_sitter_go::TAGS_QUERY.into(),
+            format!("{GO_EXTRA}\n{}", tree_sitter_go::TAGS_QUERY),
         ),
         Lang::Ruby => (
             tree_sitter_ruby::LANGUAGE.into(),
@@ -209,6 +215,12 @@ mod tests {
                 "{lang:?}"
             );
         }
+    }
+
+    #[test]
+    fn extra_queries_feed_the_index_fingerprint() {
+        let all = extra_queries();
+        assert!(all.contains(CSHARP_EXTRA) && all.contains(GO_EXTRA));
     }
 
     #[test]

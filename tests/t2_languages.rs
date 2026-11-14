@@ -304,6 +304,18 @@ fn csharp_defs_and_bodies() {
 }
 
 #[test]
+fn go_type_aliases_are_types() {
+    let r = rows("go/alias.go");
+    check(
+        row(&r, "GitInfo"),
+        "type",
+        3,
+        None,
+        "GitInfo = gitmap.GitInfo",
+    );
+}
+
+#[test]
 fn csharp_enums_structs_and_records_are_classes_inside_their_namespace() {
     let r = rows("csharp/Types.cs");
     check(
