@@ -539,12 +539,16 @@ fn precise_empty_answer_falls_back() {
 }
 
 #[test]
-fn precise_empty_answer_with_no_name_match_stays_empty() {
+fn precise_empty_answer_with_no_name_match_still_gives_the_reason() {
     let r = repo();
     r.write("e.rs", "fn lonely() {}\n");
     let o = precise(&r, &[("FAKE_REFS", "[]")], &["refs", "lonely", "--precise"]);
     assert_eq!(o.code, 1, "{}", o.err);
-    assert_eq!(o.err, "");
+    assert_eq!(o.out, "");
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: 言語サーバーの答えが0件でした。名前一致の結果です（未確定）\n"
+    );
 }
 
 #[test]

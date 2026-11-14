@@ -70,8 +70,8 @@ pub(crate) fn run(
             return emit(out, err, &lines, total);
         }
         // 読み込み途中のサーバーは0件と答えうるので、0件は確定とみなさない。
-        Ok(_) => None,
-        Err(why) => Some(why),
+        Ok(_) => "言語サーバーの答えが0件でした".to_string(),
+        Err(why) => why,
     };
     let (mut found_out, mut found_err) = (Vec::new(), Vec::new());
     // Go の継承は名前一致では分からない。`--precise` を勧める案内は、使った後には出さない。
@@ -79,17 +79,10 @@ pub(crate) fn run(
         && only_go(&resolve(view, term).map_err(|c| corrupt(c, ctx))?);
     let found =
         !go_only && name_match(ctx, view, kind, term, limit, &mut found_out, &mut found_err)?;
-    // 0件どうしなら答えは食い違っていないので、戻ったとは告げない。
-    let why = match why {
-        Some(why) => Some(why),
-        None => found.then(|| "言語サーバーの答えが0件でした".to_string()),
-    };
-    if let Some(why) = why {
-        writeln!(
-            err,
-            "ferrindex: --precise: {why}。名前一致の結果です（未確定）"
-        )?;
-    }
+    writeln!(
+        err,
+        "ferrindex: --precise: {why}。名前一致の結果です（未確定）"
+    )?;
     err.write_all(&found_err)?;
     out.write_all(&found_out)?;
     Ok(found)
