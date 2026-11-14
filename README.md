@@ -219,12 +219,13 @@ dockerのデータディレクトリのように索引に要らないものは�
 
 hookは標準入力のJSONから`cwd`を読みます。
 cwdがgitリポジトリの中にあるときは、ferrindexの使い方を短い案内として標準出力に出します。
-案内は、`find`が各定義の行を表示するので確認のgrepやReadは要らないこと、本体は`show`で直接引くこと、呼び出し元の検索は`rg -n`を使うことを伝えます。
+案内は、`find`が各定義の行を表示するので確認のgrepやReadは要らないこと、本体は`show`で直接引くことを伝えます。
+呼び出し元は`callers`、使用箇所は`refs`で探し、その出力を確かめ直さずに使うことも伝えます。
 Claude CodeはSessionStartの標準出力をClaudeの文脈に加えるので、ClaudeはGrepやReadより先にferrindexを使えます。
 索引がまだ無いときは、`ferrindex update`を切り離して起動し、最初の検索が待つことがある旨を案内に足します。
 gitリポジトリの外や入力の誤りでは何も出力しません。いずれの場合も終了コードは0です。
 
-`ferrindex hook post-tool-use`は、Bashで`ferrindex find`か`ferrindex show`を実行した直後にだけ働きます。
+`ferrindex hook post-tool-use`は、Bashで`ferrindex`の`find`、`show`、`callers`、`refs`を実行した直後にだけ働きます。
 その出力で問いに答えられるなら、Readやrgで確かめ直さずにそのまま答えるよう、Claudeに短く添えます。
 確かめ直すとやり取りが1回増え、そのたびにClaude Codeは会話の文脈を読み直すので、入力のtokenが増えます。
 ほかのコマンドと入力の誤りでは何も出力しません。終了コードは常に0です。

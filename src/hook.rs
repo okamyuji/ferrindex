@@ -27,7 +27,7 @@ fn cwd_of(input: &str) -> Option<PathBuf> {
 
 const GUIDANCE: &str = "このリポジトリでは ferrindex の索引を使えます。定義の場所は `ferrindex find <名前>`（`Class.method` も可）で引いてください。各行に定義の行が付くので、確認のための grep や Read は要りません。
 本体が要るときは find と Read ではなく `ferrindex show <名前>` を直接使ってください。ファイルの定義一覧は `ferrindex outline <file>`、ファイル名は `ferrindex files <部分文字列>` で引けます。
-呼び出し元と使用箇所は `rg -n` で探してください。終了コード 3 のときも `rg -n` を使ってください。
+呼び出し元は `ferrindex callers <名前>`、使用箇所は `ferrindex refs <名前>` で探してください。各行に、その位置を囲む定義が付きます。callers と refs の出力はそのまま回答に使えるので、rg、Grep、Read で確かめ直さないでください。終了コード 3 のときは `rg -n` を使ってください。
 ";
 
 const BUILDING: &str = "索引を背景で作成中です。最初の検索は待つことがあります。\n";
@@ -65,15 +65,16 @@ pub fn session_start(stdin: impl Read) -> String {
 
 const ANSWER_NOW: &str = "上の ferrindex の出力は、いまの作業ツリーから引いた位置と定義の行（show は本体）です。問いがこの位置と定義行で答えられるなら、Read、rg、grep、sed で確かめ直さずに、そのまま回答してください。足りない情報があるときだけ、その部分に絞って追加で調べてください。";
 
-/// コマンドのどこかで `ferrindex find` か `ferrindex show` を実行しているか。
+/// コマンドのどこかで `ferrindex` の find、show、callers、refs を実行しているか。
 fn runs_lookup(command: &str) -> bool {
     command.split(['&', '|', ';', '\n']).any(|seg| {
         let mut w = seg.split_whitespace();
-        w.next() == Some("ferrindex") && matches!(w.next(), Some("find" | "show"))
+        w.next() == Some("ferrindex")
+            && matches!(w.next(), Some("find" | "show" | "callers" | "refs"))
     })
 }
 
-/// PostToolUse の hook。`ferrindex find` か `show` の直後にだけ、確かめ直さずに答えるよう添える。
+/// PostToolUse の hook。`ferrindex` の find、show、callers、refs の直後にだけ、確かめ直さずに答えるよう添える。
 /// 確認の Read や rg で 1 ターン増え、そのたびに固定の文脈を読み直すのを防ぐ。
 /// 当たらない入力と失敗では空文字列を返す。
 pub fn post_tool_use(stdin: impl Read) -> String {
