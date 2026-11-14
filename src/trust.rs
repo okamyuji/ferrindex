@@ -14,6 +14,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+use crate::query::escape_control;
 use crate::store::{with_lock, write_atomic};
 
 const LIST: &str = "trusted";
@@ -48,13 +49,19 @@ fn keys(dir: &Path) -> io::Result<Vec<String>> {
     }
 }
 
+/// 種類は `Fail` が終了コードを選ぶのに使うので保ち、どのファイルかを添える。
+fn naming(dir: &Path, e: io::Error) -> io::Error {
+    let path = escape_control(dir.join(LIST).as_os_str().as_bytes());
+    io::Error::new(e.kind(), format!("{}: {e}", String::from_utf8_lossy(&path)))
+}
+
 /// `root` は `find_root` が返した正規化済みの根。
 pub fn is_trusted(root: &Path) -> io::Result<bool> {
     is_trusted_in(&data_dir(), root)
 }
 
 fn is_trusted_in(dir: &Path, root: &Path) -> io::Result<bool> {
-    Ok(keys(dir)?.contains(&key(root)))
+    Ok(keys(dir).map_err(|e| naming(dir, e))?.contains(&key(root)))
 }
 
 pub fn set(root: &Path, trusted: bool) -> io::Result<()> {
@@ -73,7 +80,8 @@ fn set_in(dir: &Path, root: &Path, trusted: bool) -> io::Result<()> {
             list.iter().try_for_each(|k| writeln!(f, "{k}"))
         })
     };
-    with_lock(dir, LOCK_TIMEOUT, update)?.map_err(io::Error::other)?
+    let done = with_lock(dir, LOCK_TIMEOUT, update).and_then(|r| r.map_err(io::Error::other));
+    done.and_then(|r| r).map_err(|e| naming(dir, e))
 }
 
 #[cfg(test)]
@@ -122,10 +130,18 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_list_is_an_error() {
+    fn unreadable_list_is_an_error_naming_the_list() {
         let d = tempfile::tempdir().unwrap();
-        // 一覧の位置にディレクトリがあると読めない。
-        fs::create_dir_all(d.path().join(LIST)).unwrap();
-        assert!(is_trusted_in(d.path(), Path::new("/r")).is_err());
+        let dir = d.path().join("a\x1bb");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(LIST), b"\xff\n").unwrap();
+        let want = format!("{}/a\\x1bb/trusted: ", d.path().display());
+        for e in [
+            is_trusted_in(&dir, Path::new("/r")).unwrap_err(),
+            set_in(&dir, Path::new("/r"), true).unwrap_err(),
+        ] {
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+            assert!(e.to_string().starts_with(&want), "{e}");
+        }
     }
 }
