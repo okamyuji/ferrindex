@@ -20,7 +20,11 @@ fn cwd_of(input: &str) -> Option<PathBuf> {
 /// SessionStart の標準出力は Claude の文脈に入る。
 pub fn session_start(stdin: impl Read) {
     let mut input = String::new();
-    if stdin.take(MAX_INPUT_BYTES).read_to_string(&mut input).is_err() {
+    if stdin
+        .take(MAX_INPUT_BYTES)
+        .read_to_string(&mut input)
+        .is_err()
+    {
         return;
     }
     let Some(root) = cwd_of(&input).and_then(|c| find_root(&c)) else {
