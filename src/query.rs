@@ -212,9 +212,28 @@ impl Ctx {
         fresh::refresh(&self.root).map_err(|e| Fail::fresh(e, &self.hint))
     }
 
-    fn display<'a>(&self, path: &'a [u8]) -> &'a [u8] {
-        path.strip_prefix(self.prefix.as_slice()).unwrap_or(path)
+    fn display(&self, path: &[u8]) -> Vec<u8> {
+        relative_to(&self.prefix, path)
     }
+}
+
+/// 根相対の `path` を、根相対のディレクトリ `dir_prefix`（`a/b/` の形、根は空）からの相対にする。
+/// 外のファイルは `../` を付ける。
+fn relative_to(dir_prefix: &[u8], path: &[u8]) -> Vec<u8> {
+    let dirs: Vec<&[u8]> = dir_prefix
+        .split(|&b| b == b'/')
+        .filter(|c| !c.is_empty())
+        .collect();
+    let parts: Vec<&[u8]> = path.split(|&b| b == b'/').collect();
+    let dir_parts = &parts[..parts.len() - 1];
+    let common = dirs
+        .iter()
+        .zip(dir_parts)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut out = b"../".repeat(dirs.len() - common);
+    out.extend(parts[common..].join(&b'/'));
+    out
 }
 
 /// 根からの相対ディレクトリを、経路の前方一致に使う `a/b/` の形にする。根は空。
@@ -251,7 +270,7 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
                 .iter()
                 .map(|f| {
                     def_line(
-                        ctx.display(&f.path),
+                        &ctx.display(&f.path),
                         f.line,
                         f.col,
                         f.kind,
@@ -269,7 +288,7 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
                 .files()
                 .into_iter()
                 .filter(|(p, _)| contains_ignore_ascii_case(p, t.as_bytes()))
-                .map(|(p, _)| ctx.display(&p).to_vec())
+                .map(|(p, _)| ctx.display(&p))
                 .collect();
             emit(out, err, &lines, limit(DEFAULT_LIMIT))
         }
@@ -405,7 +424,7 @@ fn show_one(ctx: &Ctx, f: &Found, out: &mut impl Write) -> Res<()> {
     let lines: Vec<&str> = body.lines().collect();
     let first = text[..start].matches('\n').count() + 1;
     let last = first + lines.len().saturating_sub(1);
-    let mut head = ctx.display(&f.path).to_vec();
+    let mut head = ctx.display(&f.path);
     head.extend(format!(":{first}-{last} {} ", kind_name(f.kind)).bytes());
     if let Some(c) = &f.container {
         head.extend_from_slice(c);
@@ -488,7 +507,7 @@ fn map(
         }
         let text = String::from_utf8_lossy(&bytes);
         let lang = lang_of(rel);
-        out.write_all(ctx.display(path))?;
+        out.write_all(&ctx.display(path))?;
         writeln!(
             out,
             "  ~{}  {}",
@@ -534,6 +553,22 @@ mod tests {
     fn dir_prefix_adds_a_slash_only_below_the_root() {
         assert_eq!(dir_prefix(Path::new("")), b"");
         assert_eq!(dir_prefix(Path::new("a/b")), b"a/b/");
+    }
+
+    #[test]
+    fn relative_paths_climb_out_of_the_current_directory() {
+        let rel = |dir: &str, path: &str| {
+            String::from_utf8(relative_to(dir.as_bytes(), path.as_bytes())).unwrap()
+        };
+        assert_eq!(rel("", "a/b.rs"), "a/b.rs");
+        assert_eq!(rel("sub/", "sub/a.rs"), "a.rs");
+        assert_eq!(rel("sub/", "top.rs"), "../top.rs");
+        assert_eq!(rel("sub/", "other/x.rs"), "../other/x.rs");
+        assert_eq!(rel("a/b/", "a/c/x.rs"), "../c/x.rs");
+        assert_eq!(rel("a/b/", "a/x.rs"), "../x.rs");
+        assert_eq!(rel("a/b/", "a/b/c/x.rs"), "c/x.rs");
+        assert_eq!(rel("src/", "src2/x.rs"), "../src2/x.rs");
+        assert_eq!(rel("src/", "src"), "../src");
     }
 
     #[test]

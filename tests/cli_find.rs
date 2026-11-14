@@ -22,9 +22,9 @@ fn subdir_relative_paths() {
     assert_eq!(
         from_sub.lines(),
         [
-            "other/out.rs:1:4 function target",
+            "../other/out.rs:1:4 function target",
             "in.rs:1:4 function target",
-            "top.rs:1:4 function target"
+            "../top.rs:1:4 function target"
         ]
     );
 }

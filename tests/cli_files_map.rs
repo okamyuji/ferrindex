@@ -158,3 +158,35 @@ fn map_default_limit_is_200() {
     assert_eq!(run.lines().len(), 200);
     assert_eq!(run.err, "… 5 more\n");
 }
+
+#[test]
+fn files_and_map_print_paths_outside_cwd_with_dotdot() {
+    let r = Repo::new();
+    r.write("sub/a.rs", "// in sub\nfn a() {}\n");
+    r.write("top.rs", "// at top\nfn t() {}\n");
+    r.write("other/o.rs", "fn o() {}\n");
+    let files = r.run_in(Path::new("sub"), &["files", ".rs"]);
+    assert_eq!(files.lines(), ["../other/o.rs", "a.rs", "../top.rs"]);
+    let map = r.run_in(Path::new("sub"), &["map", ".."]);
+    assert_eq!(
+        map.lines(),
+        [
+            "../other/o.rs  ~2  ",
+            "a.rs  ~5  in sub",
+            "../top.rs  ~5  at top"
+        ]
+    );
+    let sibling = r.run_in(Path::new("sub"), &["map", "../other"]);
+    assert_eq!(sibling.lines(), ["../other/o.rs  ~2  "]);
+}
+
+#[test]
+fn map_description_for_python_is_the_module_docstring() {
+    let r = Repo::new();
+    r.write("doc.py", "#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n\"\"\"Tool for x.\n\nmore\n\"\"\"\n# later\n");
+    r.write("nodoc.py", "# plain comment\nx = 1\n");
+    let run = r.run(&["map"]);
+    let lines = run.lines();
+    assert!(lines[0].ends_with("  Tool for x."), "{lines:?}");
+    assert!(lines[1].ends_with("  plain comment"), "{lines:?}");
+}

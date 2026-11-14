@@ -20,11 +20,34 @@ pub fn description(text: &str, lang: Option<Lang>) -> String {
             .map(|d| d.name)
             .unwrap_or_default();
     }
+    if lang == Some(Lang::Python)
+        && let Some(doc) = py_docstring(text)
+    {
+        return doc;
+    }
     text.lines()
         .take(DESCRIBE_LINES)
         .find_map(comment_text)
         .unwrap_or_default()
         .to_string()
+}
+
+/// 先頭の文が `"""` か `'''` の文字列ならその最初の行。`#` の行（shebang、エンコーディング宣言）は読み飛ばす。
+fn py_docstring(text: &str) -> Option<String> {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'));
+    let first = lines.next()?;
+    let rest = ["\"\"\"", "'''"]
+        .iter()
+        .find_map(|q| first.strip_prefix(q))?;
+    let clean = |l: &str| l.trim().trim_end_matches(['"', '\'']).trim().to_string();
+    let head = clean(rest);
+    if !head.is_empty() {
+        return Some(head);
+    }
+    lines.map(|l| clean(l)).find(|l| !l.is_empty())
 }
 
 /// `#!` と `#include` は `# ` で始まらないのでコメントに数えない。
@@ -62,6 +85,24 @@ mod tests {
         assert_eq!(comment_text("#include <a.h>"), None);
         assert_eq!(comment_text("//"), None);
         assert_eq!(comment_text("let a = 1;"), None);
+    }
+
+    #[test]
+    fn python_docstring_cases() {
+        let d = |t: &str| description(t, Some(Lang::Python));
+        assert_eq!(d("\"\"\"Tool for x.\"\"\"\ndef f(): pass\n"), "Tool for x.");
+        assert_eq!(
+            d("#!/usr/bin/env python\n# -*- coding: utf-8 -*-\n\n'''Second quote.\nmore\n'''\n"),
+            "Second quote."
+        );
+        assert_eq!(d("\"\"\"\n  Next line doc.\n\"\"\"\n"), "Next line doc.");
+        assert_eq!(d("\"\"\"\n\"\"\"\n# note\n"), "note");
+        assert_eq!(
+            d("import os\n\"\"\"not a docstring\"\"\"\n# real comment\n"),
+            "real comment"
+        );
+        assert_eq!(d("# only comment\ndef f(): pass\n"), "only comment");
+        assert_eq!(d(""), "");
     }
 
     #[test]
