@@ -47,7 +47,7 @@ fn py_docstring(text: &str) -> Option<String> {
     if !head.is_empty() {
         return Some(head);
     }
-    lines.map(|l| clean(l)).find(|l| !l.is_empty())
+    lines.map(clean).find(|l| !l.is_empty())
 }
 
 /// `#!` と `#include` は `# ` で始まらないのでコメントに数えない。
