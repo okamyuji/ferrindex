@@ -54,6 +54,7 @@ fn precise_fails_when_an_answered_file_is_unreadable() {
     r.write("c.rs", "fn other() {\n    helper();\n}\n");
     r.age();
     assert_eq!(r.run(&["update"]).code, 0);
+    r.trust();
     fs::set_permissions(r.root.join("c.rs"), fs::Permissions::from_mode(0o000)).unwrap();
     let server = format!(
         "python3 -I {}/tests/fixtures/fake_lsp.py",

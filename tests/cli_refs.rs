@@ -261,6 +261,7 @@ fn fake_server() -> String {
 
 /// `target` を参照する c.rs を足した作業ツリーで、偽サーバーを使って実行する。
 fn precise(r: &Repo, env: &[(&str, &str)], args: &[&str]) -> common::Run {
+    r.trust();
     let server = fake_server();
     let mut all = vec![("FERRINDEX_LSP_RUST", server.as_str())];
     all.extend_from_slice(env);
@@ -592,6 +593,7 @@ fn c_without_compile_commands_does_not_start_clangd() {
         ("FAKE_REFS", r#"[["x.c", 1, 21]]"#),
         ("FAKE_LOG", log.to_str().unwrap()),
     ];
+    r.trust();
     let o = r.run_with(&env, &["refs", "target", "--precise"]);
     assert!(!log.exists());
     assert_eq!(
@@ -752,6 +754,7 @@ fn markdown_only_definition_reason_names_no_server() {
     let r = Repo::new();
     r.write("doc.md", "## lonely\n");
     r.write("a.rs", "fn x() {\n    lonely();\n}\n");
+    r.trust();
     let o = r.run(&["callers", "lonely", "--precise"]);
     assert_eq!(o.lines().len(), 1);
     assert_eq!(
@@ -767,6 +770,7 @@ fn go_precise_failure_shows_the_reason_not_the_hint() {
         "p.go",
         "package p\n\ntype Provider interface {\n\tGet() int\n}\n\ntype X struct{}\n\nfunc (X) Get() int { return 0 }\n\nvar _ Provider = X{}\n",
     );
+    r.trust();
     let o = r.run_with(
         &[("FERRINDEX_LSP_GO", "/nonexistent/x")],
         &["impls", "Provider", "--precise"],
@@ -785,6 +789,7 @@ fn go_precise_failure_shows_the_reason_not_the_hint() {
 }
 
 fn precise_py(r: &Repo, answer: &str, args: &[&str]) -> common::Run {
+    r.trust();
     let server = fake_server();
     r.run_with(
         &[

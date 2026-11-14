@@ -32,6 +32,7 @@ cargo install --path .
 - `ferrindex callers <name> [--limit N] [--precise]`名前を呼び出している位置を一覧します。Rubyで括弧を付けずに書いた呼び出し（`helper`だけの行）は呼び出しと数えず、`refs`に`ref`として出ます。
 - `ferrindex impls <name> [--limit N] [--precise]`名前の型を継承、実装している位置を一覧します。
 - `ferrindex supers <name> [--limit N] [--precise]`名前の型が継承、実装している型を一覧します。
+- `ferrindex trust`と`ferrindex untrust`は、カレントディレクトリのリポジトリを`--precise`に使ってよいかを切り替えます。
 
 参照の4コマンドは各行に参照の種類（`call`、`inherit`、`ref`）と、参照を囲む最も内側の定義を`in <定義>`の形で付けます。
 
@@ -75,6 +76,16 @@ typescript-language-serverは、リポジトリに入っているtsserverを使�
 jdtlsはMavenを、csharp-lsはMSBuildを、sourcekit-lspは`Package.swift`を実行します。
 `--precise`は信頼できるリポジトリでだけ使ってください。
 
+ferrindexは、利用者が信頼したリポジトリでだけ言語サーバーを起動します。
+既定ではどのリポジトリも信頼していません。
+信頼していないリポジトリで`--precise`を付けると、サーバーを起動せずに名前一致の結果を返し、標準エラーに理由を出します。
+リポジトリの中で`ferrindex trust`を端末から実行すると、そのリポジトリを信頼します。`ferrindex untrust`で取り消します。
+`trust`は標準入力が端末のときだけ受け付け、端末でなければ終了コード2で終わります。
+Claude CodeのBashツールは端末を持たないので、Claudeが自分でリポジトリを信頼することはできません。
+gitリポジトリの外では、どちらも終了コード3で終わります。
+信頼の一覧は`$XDG_DATA_HOME/ferrindex/trusted`に置きます。未設定なら`~/.local/share/ferrindex/trusted`です。
+一覧には、根のパスそのものでなく、そのハッシュだけを書きます。
+
 多くのサーバーはプロジェクトを読み込み終える前にも、そうと知らせずに少ない答えを返します。
 そのためferrindexは最初の答えを得た後も、同じ問い合わせを約1秒おきに送り直します。
 続けて2回、同じ位置の集合が返ったときに、その答えを結果として採ります。
@@ -88,6 +99,7 @@ jdtlsはMavenを、csharp-lsはMSBuildを、sourcekit-lspは`Package.swift`を�
 Goの`impls`と`supers`は名前一致で答えられないので、理由の行は`ferrindex: --precise: <理由>`だけで、終了コード1で終わります。
 次の場合が該当します。
 
+- リポジトリを信頼していません。
 - 名前と完全に一致する定義が索引に無いか、5件を超えています。`--precise`は部分一致の定義を使わず、Markdownの見出しも問い合わせません。
 - `impls`と`supers`で、名前一致の継承の行の中に、サーバーの答えに無いものがあります。`impls`は各行の実装している型を、`supers`は基底の型の名前を答えの型と比べます。`impls`の答えからは、問い合わせた型そのものを除きます。
 - サーバーが見つからないか、起動に失敗しました。
@@ -241,7 +253,8 @@ gitリポジトリの外や入力の誤りでは何も出力しません。い�
 
 1. `settings.json`から`ferrindex hook session-start`と`ferrindex hook post-tool-use`の項目を消します。
 2. `cargo uninstall ferrindex`を実行します。
-3.索引のキャッシュディレクトリ`$XDG_CACHE_HOME/ferrindex`（未設定なら`~/.cache/ferrindex`）を削除します。
+3. 索引のキャッシュディレクトリ`$XDG_CACHE_HOME/ferrindex`（未設定なら`~/.cache/ferrindex`）を削除します。
+4. 信頼の一覧のディレクトリ`$XDG_DATA_HOME/ferrindex`（未設定なら`~/.local/share/ferrindex`）を削除します。
 
 ## ライセンス
 

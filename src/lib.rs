@@ -12,4 +12,5 @@ pub mod query;
 mod refcmd;
 pub mod refs;
 pub mod store;
+mod trust;
 pub mod walk;

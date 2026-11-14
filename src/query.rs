@@ -4,7 +4,7 @@ use std::{
     fmt::Display,
     fs,
     hash::Hash,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
@@ -17,6 +17,7 @@ use crate::index::contains_ignore_ascii_case;
 use crate::lang::{kind_name, lang_of};
 use crate::refcmd::{self, RefKind};
 use crate::store::find_root;
+use crate::trust;
 use crate::walk::MAX_FILE_BYTES;
 
 const EXIT_NONE: u8 = 1;
@@ -30,7 +31,7 @@ const SHOW_LIMIT: usize = 3;
 const MAP_LIMIT: usize = 200;
 const SHOW_MAX_LINES: usize = 200;
 
-const USAGE: &str = "usage: ferrindex update [--rebuild] [--stats] | find <name> [--limit N] | files <substr> [--limit N] | outline <file> | show <name> [--limit N] | map [<dir>] [--limit N] | refs <name> [--limit N] [--precise] | callers <name> [--limit N] [--precise] | impls <name> [--limit N] [--precise] | supers <name> [--limit N] [--precise]";
+const USAGE: &str = "usage: ferrindex update [--rebuild] [--stats] | trust | untrust | find <name> [--limit N] | files <substr> [--limit N] | outline <file> | show <name> [--limit N] | map [<dir>] [--limit N] | refs <name> [--limit N] [--precise] | callers <name> [--limit N] [--precise] | impls <name> [--limit N] [--precise] | supers <name> [--limit N] [--precise]";
 
 pub(crate) struct Fail {
     code: u8,
@@ -84,13 +85,18 @@ impl From<io::Error> for Fail {
 pub(crate) type Res<T = bool> = Result<T, Fail>;
 
 enum Cmd {
-    Update { rebuild: bool, stats: bool },
+    Update {
+        rebuild: bool,
+        stats: bool,
+    },
     Find(String),
     Files(String),
     Outline(PathBuf),
     Show(String),
     Map(Option<PathBuf>),
     Refs(RefKind, String),
+    /// `--precise` に言語サーバーの起動を許すか。
+    Trust(bool),
 }
 
 struct Cli {
@@ -157,10 +163,12 @@ fn command(name: &OsStr, pos: &[&OsString], flags: &Flags) -> Res<Cmd> {
         (Some("supers"), [t]) => Cmd::Refs(RefKind::Supers, term(t)?),
         (Some("map"), []) => Cmd::Map(None),
         (Some("map"), [d]) => Cmd::Map(Some(PathBuf::from(d))),
+        (Some("trust"), []) => Cmd::Trust(true),
+        (Some("untrust"), []) => Cmd::Trust(false),
         (
             Some(
                 "update" | "find" | "files" | "show" | "outline" | "map" | "refs" | "callers"
-                | "impls" | "supers",
+                | "impls" | "supers" | "trust" | "untrust",
             ),
             _,
         ) => {
@@ -180,7 +188,7 @@ fn parse(args: &[OsString]) -> Res<Cli> {
     if (flags.rebuild || flags.stats) && !update {
         return Err(Fail::usage("--rebuild and --stats belong to update"));
     }
-    if flags.limit.is_some() && (update || matches!(cmd, Cmd::Outline(_))) {
+    if flags.limit.is_some() && (update || matches!(cmd, Cmd::Outline(_) | Cmd::Trust(_))) {
         return Err(Fail::usage("--limit does not apply to this subcommand"));
     }
     if flags.precise && !matches!(cmd, Cmd::Refs(..)) {
@@ -324,6 +332,7 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
     let limit = |default| cli.limit.unwrap_or(default);
     match &cli.cmd {
         Cmd::Outline(file) => outline(file, out),
+        Cmd::Trust(on) => trust_root(cwd, *on, out),
         Cmd::Update { rebuild, stats } => {
             let ctx = Ctx::new(cwd, "rg --files".into())?;
             let view = if *rebuild {
@@ -636,6 +645,25 @@ fn map_dir(ctx: &Ctx, dir: Option<&Path>) -> Res<Vec<u8>> {
         return Err(Fail::usage(format!("{}: not a directory", dir.display())));
     }
     Ok(dir_prefix(rel))
+}
+
+/// 信頼は端末の利用者だけが与えられる。端末を持たない Claude Code の Bash などは自分で信頼できない。
+fn trust_root(cwd: &Path, on: bool, out: &mut impl Write) -> Res {
+    let root = find_root(cwd).ok_or_else(|| Fail {
+        code: EXIT_UNUSABLE,
+        msg: "ferrindex: not inside a git repository".into(),
+    })?;
+    if on && !io::stdin().is_terminal() {
+        return Err(Fail {
+            code: EXIT_USAGE,
+            msg: "ferrindex: trust は端末から実行してください".into(),
+        });
+    }
+    trust::set(&root, on)?;
+    out.write_all(if on { b"trusted " } else { b"untrusted " })?;
+    out.write_all(&escape_control(root.as_os_str().as_bytes()))?;
+    out.write_all(b"\n")?;
+    Ok(true)
 }
 
 /// `limit` は表示した件数で数える（バイナリと消えたファイルは数えない）。

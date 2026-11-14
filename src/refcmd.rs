@@ -21,6 +21,7 @@ use crate::query::{
     Ctx, Res, cached, corrupt, emit, escape_control, read_rel, resolve, resolve_exact, source_line,
 };
 use crate::refs::{REF_CALL, REF_INHERIT, REF_PLAIN, Ref, extract_refs};
+use crate::trust;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefKind {
@@ -150,6 +151,12 @@ fn precise_lines(
     kind: RefKind,
     term: &str,
 ) -> Res<Result<Vec<Vec<u8>>, String>> {
+    if !trust::is_trusted(&ctx.root)? {
+        return Ok(Err(
+            "このリポジトリは信頼されていません。`ferrindex trust` を端末で実行すると使えます"
+                .to_string(),
+        ));
+    }
     let mut defs = resolve_exact(view, term).map_err(|c| corrupt(c, ctx))?;
     // Markdown の見出しには言語サーバーが無い。コードの定義だけを問う。
     let section = kind_id("section");
