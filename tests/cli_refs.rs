@@ -501,6 +501,19 @@ fn refs_drop_the_declaration_the_server_returns() {
 }
 
 #[test]
+fn refs_keep_a_recursive_call_inside_the_queried_function() {
+    let r = Repo::new();
+    r.write("r.rs", "fn target(n: u32) {\n    target(n - 1);\n}\n");
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["r.rs", 1, 4]]"#)],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["r.rs:2:5 call in target\ttarget(n - 1);"]);
+}
+
+#[test]
 fn precise_belongs_to_the_reference_commands() {
     let r = repo();
     let o = r.run(&["find", "target", "--precise"]);
