@@ -471,8 +471,10 @@ fn many_references_on_one_line_take_linear_time() {
         start.elapsed()
     };
     time(1000);
-    let small = time(4000);
-    let large = time(16000);
+    // 機械の負荷の揺れで偽の失敗を出さないよう、3回の最小値で比べる
+    let best = |n| (0..3).map(|_| time(n)).min().unwrap();
+    let small = best(4000);
+    let large = best(16000);
     // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
     assert!(large < small * 8, "{small:?} -> {large:?}");
 }
