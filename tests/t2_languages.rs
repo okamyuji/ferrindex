@@ -490,3 +490,24 @@ fn swift_nested_class_keeps_its_own_range() {
     let inner = d.iter().find(|d| d.name == "Inner").unwrap();
     assert_eq!(&src[inner.body.clone()], "class Inner {}");
 }
+
+#[test]
+fn many_nested_and_flat_holders_get_the_right_container() {
+    let depth = 300;
+    let mut src = String::new();
+    for i in 0..depth {
+        src.push_str(&format!("mod m{i} {{\n"));
+    }
+    src.push_str("fn leaf() {}\n");
+    src.push_str(&"}\n".repeat(depth));
+    for i in 0..20_000 {
+        src.push_str(&format!("struct S{i};\nfn f{i}() {{}}\n"));
+    }
+    let d = defs_of(Lang::Rust, &src);
+    let c = |n: &str| d.iter().find(|d| d.name == n).unwrap().container.clone();
+    assert_eq!(c("leaf"), Some(format!("m{}", depth - 1)));
+    assert_eq!(c("m0"), None);
+    assert_eq!(c("m17"), Some("m16".into()));
+    assert_eq!(c("f19999"), None);
+    assert_eq!(d.len(), depth + 1 + 40_000);
+}

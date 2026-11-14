@@ -47,8 +47,12 @@ fn tag_defs(lang: Lang, src: &[u8]) -> Option<Vec<Def>> {
             continue;
         }
         let kind = cfg.syntax_type_name(tag.syntax_type_id);
-        let node = root.descendant_for_byte_range(tag.range.start, tag.range.end)?;
-        let name_node = root.descendant_for_byte_range(tag.name_range.start, tag.name_range.end)?;
+        let (Some(node), Some(name_node)) = (
+            root.descendant_for_byte_range(tag.range.start, tag.range.end),
+            root.descendant_for_byte_range(tag.name_range.start, tag.name_range.end),
+        ) else {
+            continue;
+        };
         let body = adjust(lang, node, name_node);
         defs.push(Def {
             name: String::from_utf8_lossy(&src[tag.name_range.clone()]).into_owned(),
@@ -60,25 +64,46 @@ fn tag_defs(lang: Lang, src: &[u8]) -> Option<Vec<Def>> {
         });
         names.push(tag.name_range);
     }
-    for i in 0..defs.len() {
-        defs[i].container = container_of(&defs, &names, i);
+    let containers = containers(&defs, &names);
+    for (d, c) in defs.iter_mut().zip(containers) {
+        d.container = c;
     }
     Some(defs)
 }
 
-/// 名前の範囲を含む最も内側の class / interface / module / type。自分自身は除く。
-fn container_of(defs: &[Def], names: &[Range<usize>], i: usize) -> Option<String> {
-    let holders = ["class", "interface", "module", "type"].map(kind_id);
-    defs.iter()
-        .enumerate()
-        .filter(|(j, d)| {
-            *j != i
-                && holders.contains(&d.kind)
-                && d.body.start <= names[i].start
-                && names[i].end <= d.body.end
-        })
-        .min_by_key(|(_, d)| d.body.len())
-        .map(|(_, d)| d.name.clone())
+/// 各定義の名前の範囲を含む最も内側の class / interface / module / type（自分自身は除く）。
+/// 定義を名前の位置順に走査し、holder の範囲を入れ子のスタックで持つので O(n log n)。
+fn containers(defs: &[Def], names: &[Range<usize>]) -> Vec<Option<String>> {
+    let holder_kinds = ["class", "interface", "module", "type"].map(kind_id);
+    let mut holders: Vec<usize> = (0..defs.len())
+        .filter(|&i| holder_kinds.contains(&defs[i].kind))
+        .collect();
+    holders.sort_by_key(|&i| (defs[i].body.start, std::cmp::Reverse(defs[i].body.end)));
+    let mut order: Vec<usize> = (0..defs.len()).collect();
+    order.sort_by_key(|&i| names[i].start);
+
+    let mut out = vec![None; defs.len()];
+    let mut next = 0;
+    let mut stack: Vec<usize> = Vec::new();
+    for i in order {
+        while next < holders.len() && defs[holders[next]].body.start <= names[i].start {
+            stack.push(holders[next]);
+            next += 1;
+        }
+        while stack
+            .last()
+            .is_some_and(|&h| defs[h].body.end < names[i].end)
+        {
+            stack.pop();
+        }
+        // 自分自身の下にあるエントリは名前を含むとは限らないので範囲を確かめる
+        let inner = stack
+            .iter()
+            .rev()
+            .find(|&&h| h != i && names[i].end <= defs[h].body.end);
+        out[i] = inner.map(|&h| defs[h].name.clone());
+    }
+    out
 }
 
 /// 範囲が同じ入れ子のノードの一番外側（Dart は method_signature と function_signature が同じ範囲になる）。
