@@ -28,6 +28,12 @@ cargo install --path .
 - `ferrindex outline <file>` ファイル内の定義を一覧します。
 - `ferrindex show <name> [--limit N]` 定義の本体を表示します。
 - `ferrindex map [<dir>] [--limit N]` ファイルごとの概要を一覧します。
+- `ferrindex refs <name> [--limit N] [--precise]` 名前を参照しているコードの位置を一覧します。コメントと文字列の中は数えません。
+- `ferrindex callers <name> [--limit N] [--precise]` 名前を呼び出している位置を一覧します。
+- `ferrindex impls <name> [--limit N] [--precise]` 名前の型を継承、実装している位置を一覧します。
+- `ferrindex supers <name> [--limit N] [--precise]` 名前の型が継承、実装している型を一覧します。
+
+参照の4コマンドは、各行に参照の種類（`call`、`inherit`、`ref`）と、参照を囲む最も内側の定義を`in <定義>`の形で付けます。
 
 出力例です。
 
@@ -55,6 +61,69 @@ src/cli/alias.rs  ~2806  CLI aliases (`awscli/alias.py`): the `[toplevel]` alias
 - 2 使い方が誤っています。
 - 3 索引が使えません。
 - 4 その他の I/O エラーです。
+
+## --precise
+
+参照の4コマンドは、既定では名前の一致で答えます。
+同じ名前の別の定義への参照も混ざりますが、索引から即座に返せます。
+`--precise`を付けると、ferrindexは定義の言語の言語サーバーをその場で起動して問い合わせ、答えを得たらサーバーを止めます。
+サーバーは常駐しません。
+
+同じ名前の定義が複数あるときは、定義ごとに問い合わせて結果を合わせます。
+定義が5件を超える名前では、問い合わせずに名前一致の結果を返します。
+待ちの上限は、すべての問い合わせを合わせて30秒です。
+
+問い合わせられないとき、ferrindexは名前一致の結果を返し、標準エラーに理由を出します。
+該当するのは、定義が索引に無い場合、定義が多すぎる場合、サーバーが見つからない場合、起動に失敗した場合、30秒以内に答えが無い場合です。
+理由の行は`ferrindex: <サーバー名>: <理由>。名前一致の結果です（未確定）`の形になり、終了コードは名前一致と同じです。
+
+```text
+$ ferrindex callers walk_builder --precise --limit 2
+crates/core/main.rs:111:10 call in search	.walk_builder()?
+crates/core/main.rs:175:10 call in search_parallel	args.walk_builder()?.build_parallel().run(|| {
+… 2 more
+```
+
+ferrindexが起動するサーバーは次のとおりです。
+サーバーはferrindexに同梱していないので、使う言語のものを別に入れておきます。
+
+| 言語 | サーバー | 起動の条件 |
+|---|---|---|
+| Rust | rust-analyzer | |
+| Go | gopls | |
+| Python | pyright-langserver | |
+| TypeScript、JavaScript | typescript-language-server | |
+| Java | jdtls | JDK 25以上。`FERRINDEX_JAVA_HOME`、Homebrewのopenjdk、`/usr/libexec/java_home`の順に探します。 |
+| C# | csharp-ls | .NET。`DOTNET_ROOT`、Homebrewのdotnet、`/usr/local/share/dotnet`の順に探します。リポジトリの`global.json`が求めるSDKも要ります。 |
+| Ruby | solargraph | |
+| C、C++ | clangd | |
+| Swift | sourcekit-lsp | |
+| Lua | lua-language-server | |
+| Dart | dart language-server | |
+
+サーバーはPATHと`~/.dotnet/tools`から探します。
+
+### 作業ツリーに作られるもの
+
+ferrindexは、サーバーが作業領域やビルドの結果を作業ツリーに書かないよう、次の設定で起動します。
+
+- jdtlsの作業領域（`-data`）は索引のキャッシュの下に置きます。`.project`などのメタデータもそこに書かせ、自動ビルドは止めます。
+- rust-analyzerが呼ぶcargoの`target/`は、`CARGO_TARGET_DIR`で索引のキャッシュの下に向けます。
+
+それでもサーバーが作業ツリーに作るものがあります。
+
+| サーバー | 作られるもの |
+|---|---|
+| csharp-ls | 各プロジェクトの`obj/`。MSBuildが依存の復元とプロジェクトの評価に使います。 |
+
+ほかのサーバーは、上の設定で作業ツリーにファイルを作りません。
+
+### サーバーのプロセス
+
+ferrindexは問い合わせのたびにサーバーのプロセスグループを止め、サーバーが起動した子プロセスも残しません。
+Ctrl-Cや`kill`でferrindexを途中で止めた場合も、同じように止まります。
+そのために、ferrindexはサーバーごとに`sh`のプロセスを1つ起動します。
+このプロセスはferrindexとの間のパイプが閉じるのを待ち、閉じたらサーバーのプロセスグループを止めます。
 
 ## 鮮度
 
@@ -128,6 +197,13 @@ git リポジトリの外や入力の誤りでは何も出力しません。い�
 その出力で問いに答えられるなら、Read や rg で確かめ直さずにそのまま答えるよう、Claude に短く添えます。
 確かめ直すとやり取りが 1 回増え、そのたびに Claude Code は会話の文脈を読み直すので、入力の token が増えます。
 ほかのコマンドと入力の誤りでは何も出力しません。終了コードは常に 0 です。
+
+## 試験
+
+`cargo test`で試験を実行します。
+`--precise`の試験は、本物の言語サーバーの代わりに`tests/fixtures/fake_lsp.py`を使います。
+環境変数`FERRINDEX_LSP_<言語>`（たとえば`FERRINDEX_LSP_RUST`）に起動コマンドを空白区切りで渡すと、ferrindexはその言語のサーバーとしてそのコマンドを起動します。
+`<言語>`は`RUST`、`GO`、`PYTHON`、`TYPESCRIPT`、`TSX`、`JAVASCRIPT`、`JAVA`、`CSHARP`、`RUBY`、`C`、`CPP`、`SWIFT`、`DART`、`LUA`のどれかです。
 
 ## 撤去
 

@@ -3,6 +3,7 @@
 mod client;
 mod servers;
 
+use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -11,7 +12,7 @@ use crate::lang::Lang;
 use crate::store;
 
 pub use client::query_with;
-pub use servers::{ServerSpec, pick_java_home, server_for};
+pub use servers::{ServerSpec, pick_java_home, server_for, server_name};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
@@ -60,15 +61,48 @@ pub fn query(
     method: Method,
     deadline: Instant,
 ) -> Result<Vec<Location>, LspError> {
-    let spec = with_workspace(server_for(lang)?, lang, root);
+    let spec = match replaced(lang) {
+        Some(spec) => spec,
+        None => with_workspace(server_for(lang)?, lang, root),
+    };
     query_with(&spec, root, lang, file, line, col, method, deadline)
 }
 
-/// jdtls は -data に作業領域を作る。作業ツリーの外に置く。
+/// 試験用の差し替え口。`FERRINDEX_LSP_RUST="python3 fake.py"` のように起動コマンドを渡す。
+/// shortcut: 空白で区切るだけなので、空白を含むパスは渡せない。必要になったら引用を解釈する。
+fn replaced(lang: Lang) -> Option<ServerSpec> {
+    let var = format!("FERRINDEX_LSP_{}", format!("{lang:?}").to_uppercase());
+    let line = env::var(var).ok()?;
+    let mut words = line.split_whitespace();
+    Some(ServerSpec {
+        name: server_name(lang),
+        program: words.next()?.into(),
+        args: words.map(Into::into).collect(),
+        env: vec![],
+    })
+}
+
+/// jdtls は -data に作業領域を作り、.project などを作業ツリーに作る。rust-analyzer は cargo に
+/// target/ を、sourcekit-lsp は SwiftPM に .build/ を作らせる。どれも作業ツリーの外に置く。jdtls はこの設定を `initializationOptions`
+/// でなくシステムプロパティからだけ読む（JLSFsUtils.generatesMetadataFilesAtProjectRoot）。
 fn with_workspace(mut spec: ServerSpec, lang: Lang, root: &Path) -> ServerSpec {
-    if lang == Lang::Java {
-        spec.args.push("-data".into());
-        spec.args.push(store::cache_dir(root).join("jdtls").into());
+    match lang {
+        Lang::Java => {
+            spec.args.push("-data".into());
+            spec.args.push(store::cache_dir(root).join("jdtls").into());
+            spec.args
+                .push("--jvm-arg=-Djava.import.generatesMetadataFilesAtProjectRoot=false".into());
+        }
+        Lang::Rust => {
+            let target = store::cache_dir(root).join("cargo-target");
+            spec.env.push(("CARGO_TARGET_DIR", target.into()));
+        }
+        Lang::Swift => {
+            spec.args.push("--scratch-path".into());
+            spec.args
+                .push(store::cache_dir(root).join("swiftpm").into());
+        }
+        _ => {}
     }
     spec
 }
@@ -78,7 +112,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_jdtls_gets_a_workspace_outside_the_tree() {
+    fn servers_write_outside_the_tree() {
         let spec = || ServerSpec {
             name: "s",
             program: "s".into(),
@@ -88,8 +122,27 @@ mod tests {
         let root = Path::new("/r");
         let java = with_workspace(spec(), Lang::Java, root);
         let data = store::cache_dir(root).join("jdtls");
-        assert_eq!(java.args, ["-data".into(), data.into_os_string()]);
-        assert!(with_workspace(spec(), Lang::Go, root).args.is_empty());
+        assert_eq!(
+            java.args,
+            [
+                "-data".into(),
+                data.into_os_string(),
+                "--jvm-arg=-Djava.import.generatesMetadataFilesAtProjectRoot=false".into(),
+            ]
+        );
+        assert!(java.env.is_empty());
+        let rust = with_workspace(spec(), Lang::Rust, root);
+        let target = store::cache_dir(root).join("cargo-target");
+        assert_eq!(rust.env, [("CARGO_TARGET_DIR", target.into_os_string())]);
+        assert!(rust.args.is_empty());
+        let swift = with_workspace(spec(), Lang::Swift, root);
+        let scratch = store::cache_dir(root).join("swiftpm");
+        assert_eq!(
+            swift.args,
+            ["--scratch-path".into(), scratch.into_os_string()]
+        );
+        let go = with_workspace(spec(), Lang::Go, root);
+        assert!(go.args.is_empty() && go.env.is_empty());
     }
 
     #[test]

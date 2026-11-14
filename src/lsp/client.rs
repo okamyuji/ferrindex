@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::servers::language_id;
+use super::servers::{init_options, language_id};
 use super::{Location, LspError, Method, ServerSpec};
 use crate::lang::Lang;
 
@@ -39,7 +39,7 @@ pub fn query_with(
     let file = fs::canonicalize(&file).map_err(|e| start_failed(&file, e))?;
     let text = fs::read_to_string(&file).map_err(|e| start_failed(&file, e))?;
     let mut server = Server::spawn(spec, &root)?;
-    let result = server.initialize(&root, deadline).and_then(|()| {
+    let result = server.initialize(&root, lang, deadline).and_then(|()| {
         let uri = to_uri(&file);
         let doc = json!({"uri": uri, "languageId": language_id(lang), "version": 1, "text": text});
         server.notify("textDocument/didOpen", json!({ "textDocument": doc }))?;
@@ -185,10 +185,11 @@ impl Server {
         Ok(None)
     }
 
-    fn initialize(&mut self, root: &Path, deadline: Instant) -> Result<(), LspError> {
+    fn initialize(&mut self, root: &Path, lang: Lang, deadline: Instant) -> Result<(), LspError> {
         let uri = to_uri(root);
         let params = json!({
             "processId": std::process::id(),
+            "initializationOptions": init_options(lang),
             "rootUri": uri,
             "workspaceFolders": [{"uri": uri, "name": "root"}],
             "capabilities": {

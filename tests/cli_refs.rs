@@ -184,7 +184,6 @@ fn bad_arguments_exit_2() {
     assert_eq!(r.run(&["refs"]).code, 2);
     assert_eq!(r.run(&["refs", "a", "b"]).code, 2);
     assert_eq!(r.run(&["refs", "  "]).code, 2);
-    assert_eq!(r.run(&["refs", "target", "--precise"]).code, 2);
 }
 
 #[test]
@@ -251,4 +250,184 @@ fn go_impls_and_supers_ask_for_precise() {
     // callers は Go でも名前一致で答えられる
     r.write("b.go", "package a\n\nfunc g() {\n\tx.Read()\n}\n");
     assert_eq!(r.run(&["callers", "Read"]).code, 0);
+}
+
+fn fake_server() -> String {
+    format!(
+        "python3 -I {}/tests/fixtures/fake_lsp.py",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+/// `target` を参照する c.rs を足した作業ツリーで、偽サーバーを使って実行する。
+fn precise(r: &Repo, env: &[(&str, &str)], args: &[&str]) -> common::Run {
+    let server = fake_server();
+    let mut all = vec![("FERRINDEX_LSP_RUST", server.as_str())];
+    all.extend_from_slice(env);
+    r.run_with(&all, args)
+}
+
+const C_SRC: &str = "fn other() {\n    let g = target;\n}\n";
+
+#[test]
+fn precise_uses_the_server_result() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    let log = r.xdg.with_file_name("log");
+    let o = precise(
+        &r,
+        &[
+            ("FAKE_REFS", r#"[["c.rs", 1, 12], ["a.rs", 3, 4]]"#),
+            ("FAKE_LOG", log.to_str().unwrap()),
+        ],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.code, 0, "{}", o.err);
+    // 種類は位置の参照から取る（refs の既定の ref でなく call）。
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "c.rs:2:13 ref in other\tlet g = target;",
+        ]
+    );
+    assert_eq!(o.err, "");
+    // 定義 `fn target` の名前の位置（2行4列）を 0 始まりで問う。
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "textDocument/references 1 3\n"
+    );
+}
+
+#[test]
+fn precise_maps_each_command_to_its_method() {
+    let r = repo();
+    r.write("impl.rs", "mod m {\n\n\n  fn imp() {}\n}\n");
+    r.write(
+        "caller.rs",
+        "fn g() {\n\n\n\n target();\n\n  target();\n}\n",
+    );
+    r.write("base.rs", "mod n {\n    fn base() {}\n}\n");
+    let cases = [
+        (
+            "callers",
+            vec![
+                "caller.rs:5:2 call in g\ttarget();",
+                "caller.rs:7:3 call in g\ttarget();",
+            ],
+        ),
+        ("impls", vec!["impl.rs:4:6 inherit in m\tfn imp() {}"]),
+        ("supers", vec!["base.rs:2:8 inherit in n\tfn base() {}"]),
+    ];
+    for (cmd, want) in cases {
+        let o = precise(&r, &[], &[cmd, "target", "--precise"]);
+        assert_eq!(o.code, 0, "{cmd}: {}", o.err);
+        assert_eq!(o.lines(), want, "{cmd}");
+    }
+}
+
+#[test]
+fn precise_falls_back_on_timeout() {
+    let r = repo();
+    let o = precise(
+        &r,
+        &[("FAKE_MODE", "hang")],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(o.lines().len(), 2);
+    assert_eq!(
+        o.err,
+        "ferrindex: rust-analyzer: 期限内に答えがありませんでした。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn precise_falls_back_when_the_server_fails() {
+    let r = repo();
+    let o = precise(
+        &r,
+        &[("FAKE_MODE", "garbage")],
+        &["callers", "target", "--precise"],
+    );
+    assert_eq!(o.lines(), ["a.rs:4:5 call in caller_fn\ttarget();"]);
+    assert!(
+        o.err.ends_with("名前一致の結果です（未確定）\n"),
+        "{}",
+        o.err
+    );
+}
+
+#[test]
+fn precise_queries_every_definition_up_to_5() {
+    let r = repo();
+    let log = r.xdg.with_file_name("log");
+    let log_env = [("FAKE_REFS", "[]"), ("FAKE_LOG", log.to_str().unwrap())];
+    r.write("d.rs", "\nfn target() {}\n");
+    let o = precise(&r, &log_env, &["refs", "target", "--precise"]);
+    assert_eq!(o.code, 1, "{}", o.err);
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
+
+    std::fs::remove_file(&log).unwrap();
+    for i in 0..4 {
+        r.write(&format!("e{i}.rs"), "fn target() {}\n");
+    }
+    let o = precise(&r, &log_env, &["refs", "target", "--precise"]);
+    assert!(!log.exists());
+    assert_eq!(o.lines().len(), 2);
+    assert_eq!(
+        o.err,
+        "ferrindex: targetの定義が6件あり、問い合わせる上限の5件を超えます。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn precise_with_five_definitions_asks_the_server() {
+    let r = repo();
+    for i in 0..4 {
+        r.write(&format!("e{i}.rs"), "fn target() {}\n");
+    }
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["c.rs", 1, 12]]"#)],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+}
+
+#[test]
+fn precise_without_definition_falls_back() {
+    let r = repo();
+    let o = precise(&r, &[], &["callers", "external_call", "--precise"]);
+    assert_eq!(o.lines(), ["a.rs:7:5 call in caller_fn\texternal_call();"]);
+    assert_eq!(
+        o.err,
+        "ferrindex: external_callの定義が見つかりません。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn results_outside_root_are_dropped() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    let outside = r.root.with_file_name("outside.rs");
+    std::fs::write(&outside, "fn x() { target(); }\n").unwrap();
+    let refs = format!(
+        r#"[["file://{}", 0, 9], ["c.rs", 1, 12]]"#,
+        outside.display()
+    );
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", &refs)],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.lines(), ["c.rs:2:13 ref in other\tlet g = target;"]);
+}
+
+#[test]
+fn precise_belongs_to_the_reference_commands() {
+    let r = repo();
+    let o = r.run(&["find", "target", "--precise"]);
+    assert_eq!(o.code, 2);
+    assert!(o.err.contains("--precise"), "{}", o.err);
 }

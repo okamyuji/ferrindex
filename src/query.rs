@@ -29,7 +29,7 @@ const SHOW_LIMIT: usize = 3;
 const MAP_LIMIT: usize = 200;
 const SHOW_MAX_LINES: usize = 200;
 
-const USAGE: &str = "usage: ferrindex update [--rebuild] [--stats] | find <name> [--limit N] | files <substr> [--limit N] | outline <file> | show <name> [--limit N] | map [<dir>] [--limit N] | refs <name> [--limit N] | callers <name> [--limit N] | impls <name> [--limit N] | supers <name> [--limit N]";
+const USAGE: &str = "usage: ferrindex update [--rebuild] [--stats] | find <name> [--limit N] | files <substr> [--limit N] | outline <file> | show <name> [--limit N] | map [<dir>] [--limit N] | refs <name> [--limit N] [--precise] | callers <name> [--limit N] [--precise] | impls <name> [--limit N] [--precise] | supers <name> [--limit N] [--precise]";
 
 pub(crate) struct Fail {
     code: u8,
@@ -95,6 +95,7 @@ enum Cmd {
 struct Cli {
     cmd: Cmd,
     limit: Option<usize>,
+    precise: bool,
 }
 
 fn term(arg: &OsStr) -> Res<String> {
@@ -112,6 +113,7 @@ struct Flags {
     limit: Option<usize>,
     rebuild: bool,
     stats: bool,
+    precise: bool,
 }
 
 /// フラグを取り除いた位置引数を返す。
@@ -124,6 +126,7 @@ fn split_flags(rest: &[OsString]) -> Res<(Flags, Vec<&OsString>)> {
             Some("--limit") => flags.limit = Some(limit_value(it.next())?),
             Some("--rebuild") => flags.rebuild = true,
             Some("--stats") => flags.stats = true,
+            Some("--precise") => flags.precise = true,
             Some(f) if f.starts_with("--") => {
                 return Err(Fail::usage(format!("unknown flag {f}")));
             }
@@ -179,9 +182,15 @@ fn parse(args: &[OsString]) -> Res<Cli> {
     if flags.limit.is_some() && (update || matches!(cmd, Cmd::Outline(_))) {
         return Err(Fail::usage("--limit does not apply to this subcommand"));
     }
+    if flags.precise && !matches!(cmd, Cmd::Refs(..)) {
+        return Err(Fail::usage(
+            "--precise belongs to refs, callers, impls and supers",
+        ));
+    }
     Ok(Cli {
         cmd,
         limit: flags.limit,
+        precise: flags.precise,
     })
 }
 
@@ -348,7 +357,14 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
         }
         Cmd::Refs(kind, t) => {
             let ctx = Ctx::new(cwd, grep_hint(t))?;
-            refcmd::run(&ctx, &ctx.view()?, *kind, t, limit(DEFAULT_LIMIT), out, err)
+            refcmd::run(
+                &ctx,
+                &ctx.view()?,
+                (*kind, t, cli.precise),
+                limit(DEFAULT_LIMIT),
+                out,
+                err,
+            )
         }
         Cmd::Map(dir) => map(
             &Ctx::new(cwd, "rg --files".into())?,

@@ -5,6 +5,8 @@ use std::iter;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde_json::{Value, json};
+
 use super::LspError;
 use crate::lang::Lang;
 
@@ -64,6 +66,20 @@ fn row(lang: Lang) -> Option<&'static (Lang, &'static str, &'static str, &'stati
 
 fn command_of(lang: Lang) -> Option<(&'static str, &'static [&'static str])> {
     row(lang).map(|&(_, _, name, args)| (name, args))
+}
+
+/// 利用者に見せるサーバーの名前。
+pub fn server_name(lang: Lang) -> &'static str {
+    command_of(lang).map_or("Markdown", |c| c.0)
+}
+
+/// `initialize` の `initializationOptions`。jdtls は既定で自動ビルドの結果（target/）を
+/// 作業ツリーに書くので止める。参照の検索は索引で答えるのでビルドは要らない。
+pub(super) fn init_options(lang: Lang) -> Value {
+    match lang {
+        Lang::Java => json!({"settings": {"java": {"autobuild": {"enabled": false}}}}),
+        _ => Value::Null,
+    }
 }
 
 pub(super) fn language_id(lang: Lang) -> &'static str {
@@ -168,6 +184,13 @@ mod tests {
         fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
         p
+    }
+
+    #[test]
+    fn jdtls_does_not_build_into_the_tree() {
+        let java = init_options(Lang::Java);
+        assert_eq!(java["settings"]["java"]["autobuild"]["enabled"], false);
+        assert_eq!(init_options(Lang::Go), serde_json::Value::Null);
     }
 
     #[test]

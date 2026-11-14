@@ -1,6 +1,7 @@
 //! `refs` `callers` `impls` `supers`。
 //! 索引は呼び出しと継承の参照だけを持つので、`callers` と `impls` は索引から、
 //! `supers` は定義のファイルから、`refs`（素の参照を含む）は実行時にファイルを読んで答える。
+//! `--precise` は定義の位置を言語サーバーに問い、調べられなければ名前一致に戻る。
 
 use std::{
     collections::{HashMap, HashSet},
@@ -9,13 +10,15 @@ use std::{
     io::Write,
     os::unix::ffi::OsStrExt,
     path::Path,
+    time::{Duration, Instant},
 };
 
-use crate::extract::extract;
+use crate::extract::{Def, extract};
 use crate::fresh::{Found, View, is_binary};
 use crate::lang::{Lang, lang_of};
+use crate::lsp::{self, Location, Method};
 use crate::query::{Ctx, Res, corrupt, emit, escape_control, resolve, source_line};
-use crate::refs::{REF_CALL, REF_INHERIT, Ref, extract_refs};
+use crate::refs::{REF_CALL, REF_INHERIT, REF_PLAIN, Ref, extract_refs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefKind {
@@ -46,15 +49,25 @@ impl Hit {
     }
 }
 
+/// 3つ組は（何を調べるか、名前、言語サーバーに問うか）。
 pub(crate) fn run(
     ctx: &Ctx,
     view: &View,
-    kind: RefKind,
-    term: &str,
+    (kind, term, precise): (RefKind, &str, bool),
     limit: usize,
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> Res {
+    if precise {
+        match precise_lines(ctx, view, kind, term)? {
+            Ok(mut lines) => {
+                let total = lines.len();
+                lines.truncate(limit);
+                return emit(out, err, &lines, total);
+            }
+            Err(why) => writeln!(err, "ferrindex: {why}。名前一致の結果です（未確定）")?,
+        }
+    }
     let name = last_segment(term);
     match kind {
         RefKind::Callers => indexed(ctx, view, &name, REF_CALL, limit, out, err),
@@ -91,6 +104,122 @@ fn last_segment(term: &str) -> String {
         Some((c, n)) if !c.is_empty() && !n.is_empty() => n.to_string(),
         _ => dotted,
     }
+}
+
+/// 同名の定義ごとにサーバーを起動するので、問い合わせる定義の数を抑える。
+const PRECISE_MAX_DEFS: usize = 5;
+/// 定義が複数でも、すべての問い合わせを合わせた待ちの上限。
+const PRECISE_WAIT: Duration = Duration::from_secs(30);
+
+/// 言語サーバーの答えを出力の行にする。調べられなければ理由を返す（呼び手は名前一致に戻る）。
+fn precise_lines(
+    ctx: &Ctx,
+    view: &View,
+    kind: RefKind,
+    term: &str,
+) -> Res<Result<Vec<Vec<u8>>, String>> {
+    let defs = resolve(view, term).map_err(|c| corrupt(c, ctx))?;
+    if defs.is_empty() {
+        return Ok(Err(format!("{term}の定義が見つかりません")));
+    }
+    if defs.len() > PRECISE_MAX_DEFS {
+        return Ok(Err(format!(
+            "{term}の定義が{}件あり、問い合わせる上限の{PRECISE_MAX_DEFS}件を超えます",
+            defs.len()
+        )));
+    }
+    let method = match kind {
+        RefKind::Refs => Method::References,
+        RefKind::Callers => Method::IncomingCalls,
+        RefKind::Impls => Method::Implementation,
+        RefKind::Supers => Method::Supertypes,
+    };
+    let deadline = Instant::now() + PRECISE_WAIT;
+    let mut found = Vec::new();
+    for d in &defs {
+        let file = Path::new(OsStr::from_bytes(&d.path));
+        // 索引の定義はどれも言語の決まるファイルにある。Markdown はサーバーが無いと答える。
+        let lang = lang_of(file).unwrap_or(Lang::Markdown);
+        match lsp::query(&ctx.root, lang, file, d.line, d.col, method, deadline) {
+            Ok(locs) => found.extend(locs),
+            Err(e) => return Ok(Err(format!("{}: {e}", lsp::server_name(lang)))),
+        }
+    }
+    found.sort();
+    found.dedup();
+    let plain = match kind {
+        RefKind::Refs => REF_PLAIN,
+        RefKind::Callers => REF_CALL,
+        RefKind::Impls | RefKind::Supers => REF_INHERIT,
+    };
+    Ok(Ok(located(ctx, &found, plain)))
+}
+
+/// 位置ごとにファイルを抽出し直し、その位置の参照の種類と、囲む最も内側の定義を添える。
+/// 作業ツリーの外の位置（依存ライブラリなど）は出さない。
+fn located(ctx: &Ctx, found: &[Location], plain: u8) -> Vec<Vec<u8>> {
+    // サーバーは正規化したパスで答える。
+    let root = fs::canonicalize(&ctx.root).unwrap_or_else(|_| ctx.root.clone());
+    let mut parsed: HashMap<&Path, Option<Parsed>> = HashMap::new();
+    let mut lines = Vec::new();
+    for loc in found {
+        let Ok(rel) = loc.path.strip_prefix(&root) else {
+            continue;
+        };
+        let Some((src, defs, refs)) = parsed.entry(rel).or_insert_with(|| parse(ctx, rel)) else {
+            continue;
+        };
+        let at = (loc.line, loc.col);
+        let kind = refs
+            .iter()
+            .find(|r| (r.line, r.col) == at)
+            .map_or(plain, |r| r.kind);
+        let offset = byte_offset(src, loc.line, loc.col);
+        // 位置が定義の名前そのもの（impls や supers の答え）なら、その定義は囲みに数えない。
+        let container = defs
+            .iter()
+            .filter(|d| d.body.contains(&offset) && (d.line, d.col) != at)
+            .min_by_key(|d| d.body.len())
+            .map(|d| d.name.clone().into_bytes());
+        let hit = Hit {
+            path: rel.as_os_str().as_bytes().to_vec(),
+            line: loc.line,
+            col: loc.col,
+            kind,
+            container,
+        };
+        lines.push(render(ctx, &hit, Some(src)));
+    }
+    lines
+}
+
+/// ファイルの内容と、抽出し直した定義と参照。
+type Parsed = (Vec<u8>, Vec<Def>, Vec<Ref>);
+
+fn parse(ctx: &Ctx, rel: &Path) -> Option<Parsed> {
+    let lang = lang_of(rel)?;
+    let src = read_text(ctx, rel.as_os_str().as_bytes())?;
+    let defs = extract(lang, &src);
+    let refs = extract_refs(lang, &src, &defs);
+    Some((src, defs, refs))
+}
+
+/// 1 始まりの行と、1 始まりで UTF-16 単位の列を、バイト位置にする。
+fn byte_offset(src: &[u8], line: u32, col: u32) -> usize {
+    let start: usize = src
+        .split_inclusive(|&b| b == b'\n')
+        .take(line.saturating_sub(1) as usize)
+        .map(<[u8]>::len)
+        .sum();
+    let rest = String::from_utf8_lossy(&src[start..]);
+    let mut units = 1;
+    for (i, c) in rest.char_indices() {
+        if units >= col as usize || c == '\n' {
+            return start + i;
+        }
+        units += c.len_utf16();
+    }
+    src.len()
 }
 
 fn kind_word(kind: u8) -> &'static str {
@@ -301,6 +430,20 @@ mod tests {
         assert_eq!(last_segment("a::b::c"), "c");
         assert_eq!(last_segment("Foo."), "Foo.");
         assert_eq!(last_segment(".bar"), ".bar");
+    }
+
+    #[test]
+    fn byte_offset_counts_utf16_columns() {
+        let src = "ab\n\u{3042}\u{1F600}x\n".as_bytes();
+        assert_eq!(byte_offset(src, 1, 1), 0);
+        assert_eq!(byte_offset(src, 1, 2), 1);
+        assert_eq!(byte_offset(src, 2, 1), 3);
+        assert_eq!(byte_offset(src, 2, 2), 6);
+        // 絵文字は UTF-16 で 2 単位、UTF-8 で 4 バイト。
+        assert_eq!(byte_offset(src, 2, 4), 10);
+        // 行末より右の列は行末に寄せる。
+        assert_eq!(byte_offset(src, 1, 9), 2);
+        assert_eq!(byte_offset(src, 9, 1), src.len());
     }
 
     #[test]

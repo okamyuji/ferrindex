@@ -7,6 +7,8 @@
 #   loading       initialized で読み込み中（quiescent: false）を知らせ、最初の references に空で答えてから読み込み終わりを知らせる
 # FAKE_PID_FILE があれば自分の pid を書く。FAKE_EXIT_FILE があれば shutdown の後の exit で書く。
 # FAKE_FAIL に method 名があれば、その要求にエラーで答える。
+# FAKE_REFS は references の答え（[[パス, 0始まりの行, 0始まりの列], ...] の JSON）。相対パスは根からの相対。
+# FAKE_LOG があれば、位置を問う要求ごとに「method 行 列」を1行足す。
 import json
 import os
 import sys
@@ -124,6 +126,14 @@ while True:
     elif "textDocument" in params and params["textDocument"]["uri"] not in opened:
         send({"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32602, "message": "not opened"}})
     elif method == "textDocument/references":
+        if os.environ.get("FAKE_LOG"):
+            with open(os.environ["FAKE_LOG"], "a") as f:
+                pos = params["position"]
+                f.write("%s %d %d\n" % (method, pos["line"], pos["character"]))
+        if os.environ.get("FAKE_REFS"):
+            reply(m, [{"uri": p if p.startswith("file:") else root + "/" + p, "range": rng(line, ch)}
+                      for p, line, ch in json.loads(os.environ["FAKE_REFS"])])
+            continue
         if mode == "needs_answers":
             wait_for_answers()
         if not loaded:

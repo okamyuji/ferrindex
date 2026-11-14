@@ -73,13 +73,22 @@ impl Repo {
     pub fn run_in(&self, sub: &Path, args: &[&str]) -> Run {
         run_at(&self.root.join(sub), &self.xdg, args)
     }
+
+    pub fn run_with(&self, env: &[(&str, &str)], args: &[&str]) -> Run {
+        run_env(&self.root, &self.xdg, env, args)
+    }
 }
 
 pub fn run_at(cwd: &Path, xdg: &Path, args: &[&str]) -> Run {
+    run_env(cwd, xdg, &[], args)
+}
+
+fn run_env(cwd: &Path, xdg: &Path, env: &[(&str, &str)], args: &[&str]) -> Run {
     let o = Command::new(env!("CARGO_BIN_EXE_ferrindex"))
         .args(args)
         .current_dir(cwd)
         .env("XDG_CACHE_HOME", xdg)
+        .envs(env.iter().copied())
         .output()
         .unwrap();
     Run {
