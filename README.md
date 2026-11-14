@@ -140,6 +140,8 @@ ferrindexが起動するサーバーは次のとおりです。
 | サーバー | 作られるもの |
 |---|---|
 | csharp-ls | 各プロジェクトの`obj/`。MSBuildが依存の復元とプロジェクトの評価に使います。 |
+| rust-analyzer | `Cargo.lock`。無いCargoのプロジェクトで、依存を解決したcargoが作ります。 |
+| clangd | `compile_commands.json`の隣の`.cache/clangd/index/`。背景の索引と、その中の`.gitignore`です。 |
 
 ### サーバーのプロセス
 
