@@ -51,7 +51,7 @@ cargo install --path .
 - `ferrindex show <name> [--limit N]`定義の本体を表示します。
 - `ferrindex map [<dir>] [--limit N]`ファイルごとの概要を一覧します。
 - `ferrindex refs <name> [--limit N] [--precise]`名前を参照しているコードの位置を一覧します。コメントと文字列の中は数えません。`refs`は名前を含むファイルを検索のたびに読んで解析します。OSのファイルキャッシュが冷えた最初の実行は遅く、大きなリポジトリでは数十秒かかることがあります。
-- `ferrindex callers <name> [--limit N] [--precise]`名前を呼び出している位置を一覧します。Rubyで括弧を付けずに書いた呼び出し（`helper`だけの行）は呼び出しと数えず、`refs`に`ref`として出ます。
+- `ferrindex callers <name> [--limit N] [--precise]`名前を呼び出している位置を一覧します。Rubyで括弧を付けずに書いた呼び出し（`helper`だけの行）は呼び出しと数えず、`refs`に`ref`として出ます。Rustのマクロの引数に書いた名前は直後に`(`か`!`と括弧が続くときだけ呼び出しと数えます。
 - `ferrindex impls <name> [--limit N] [--precise]`名前の型を継承、実装している位置を一覧します。
 - `ferrindex supers <name> [--limit N] [--precise]`名前の型が継承、実装している型を一覧します。
 - `ferrindex trust`と`ferrindex untrust`は、カレントディレクトリのリポジトリを`--precise`に使ってよいかを切り替えます。

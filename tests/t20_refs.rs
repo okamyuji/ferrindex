@@ -518,3 +518,52 @@ fn rust_lifetime_bounds_are_not_supertraits() {
         .collect();
     assert_eq!(inherit, ["Base"]);
 }
+
+#[test]
+fn macro_arguments_are_calls_only_before_parentheses_or_a_macro_bang() {
+    let src = "fn f() { let s = stringify!(target); println!(\"{}\", make()); \
+               m!(spaced (), a.b(c), x::y(z), q[i], v{w}, n != o, \
+               inner!(p), sq![r], br!{t}, vec![g(y)]); }\n";
+    let found = kinds(Lang::Rust, src);
+    let want: Vec<(String, u8)> = [
+        ("s", REF_PLAIN),
+        ("stringify", REF_CALL),
+        ("target", REF_PLAIN),
+        ("println", REF_CALL),
+        ("make", REF_CALL),
+        ("m", REF_CALL),
+        ("spaced", REF_CALL),
+        ("a", REF_PLAIN),
+        ("b", REF_CALL),
+        ("c", REF_PLAIN),
+        ("x", REF_PLAIN),
+        ("y", REF_CALL),
+        ("z", REF_PLAIN),
+        ("q", REF_PLAIN),
+        ("i", REF_PLAIN),
+        ("v", REF_PLAIN),
+        ("w", REF_PLAIN),
+        ("n", REF_PLAIN),
+        ("o", REF_PLAIN),
+        ("inner", REF_CALL),
+        ("p", REF_PLAIN),
+        ("sq", REF_CALL),
+        ("r", REF_PLAIN),
+        ("br", REF_CALL),
+        ("t", REF_PLAIN),
+        ("vec", REF_CALL),
+        ("g", REF_CALL),
+        ("y", REF_PLAIN),
+    ]
+    .into_iter()
+    .map(|(n, k)| (n.to_string(), k))
+    .collect();
+    assert_eq!(found, want);
+}
+
+#[test]
+fn calls_inside_attributes_stay_plain() {
+    let found = kinds(Lang::Rust, "#[cfg(any(unix))]\nfn f() {}\n");
+    assert!(found.iter().all(|(_, k)| *k == REF_PLAIN), "{found:?}");
+    assert_eq!(found.len(), 3, "{found:?}");
+}

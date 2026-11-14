@@ -98,7 +98,11 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
                 let (kind, container, container_at) = match impl_item {
                     Some(item) => (REF_INHERIT, impl_type_name(item, src), None),
                     None => (
-                        classify(&ancestors, step(&cursor, &afters, src)),
+                        kind_of(
+                            &ancestors,
+                            step(&cursor, &afters, src),
+                            &src[node.end_byte()..],
+                        ),
                         open.last().map(|&i| defs[i].name.clone()),
                         open.last().map(|&i| (defs[i].line, defs[i].col)),
                     ),
@@ -187,6 +191,27 @@ fn step<'a>(cursor: &TreeCursor<'a>, afters: &[usize], src: &[u8]) -> Step<'a> {
             && node
                 .child_by_field_name("left")
                 .is_some_and(|l| &src[l.byte_range()] == b"Self"),
+    }
+}
+
+/// `rest` は参照の後ろのソース。マクロの token tree の直下では、呼び出しの形でない名前を
+/// 外側の文脈によらず plain にする。呼び出しの形なら外側の文脈で分類する。
+fn kind_of(ancestors: &[Step], leaf: Step, rest: &[u8]) -> u8 {
+    let in_macro = ancestors.last().is_some_and(|a| a.kind == "token_tree");
+    if in_macro && !call_follows(rest) {
+        REF_PLAIN
+    } else {
+        classify(ancestors, leaf)
+    }
+}
+
+/// マクロの token tree は中の呼び出しを call_expression にせず字句を平たく並べるので、名前の
+/// 後ろの字句で見分ける。`f(` と、入れ子のマクロの `m!(`、`m![`、`m!{` を呼び出しとする。
+fn call_follows(rest: &[u8]) -> bool {
+    match rest.trim_ascii_start().split_first() {
+        Some((b'(', _)) => true,
+        Some((b'!', after)) => matches!(after.trim_ascii_start().first(), Some(b'(' | b'[' | b'{')),
+        _ => false,
     }
 }
 
