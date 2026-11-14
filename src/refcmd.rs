@@ -176,7 +176,11 @@ fn candidate(ctx: &Ctx, path: &[u8], needle: &[u8]) -> Option<(Lang, Vec<u8>)> {
     (!is_binary(&src) && contains(&src, needle)).then_some((lang, src))
 }
 
-/// 経路順に候補を読み、`limit` 行に届いたファイルの終わりで止める。
+/// 1 スレッドあたりに一度に渡すファイル数。`limit` に届いた後に無駄に読む分の上限になる。
+const FILES_PER_THREAD: usize = 16;
+
+/// 経路順の塊ごとに、候補の読み込みと解析をスレッドで分ける。`limit` 行に届いた塊の終わりで止め、
+/// 残りは読まない。
 fn refs(
     ctx: &Ctx,
     view: &View,
@@ -186,32 +190,60 @@ fn refs(
     err: &mut impl Write,
 ) -> Res {
     let files: Vec<Vec<u8>> = view.files().into_iter().map(|(p, _)| p).collect();
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut lines = Vec::new();
     let mut next = 0;
     while next < files.len() && lines.len() < limit {
-        let path = &files[next];
-        next += 1;
-        let Some((lang, src)) = candidate(ctx, path, name.as_bytes()) else {
-            continue;
-        };
-        let defs = extract(lang, &src);
-        for r in extract_refs(lang, &src, &defs) {
-            if r.name == name {
-                lines.push(render(ctx, &Hit::new(path, &r), Some(&src)));
-            }
-        }
+        let end = files.len().min(next + threads * FILES_PER_THREAD);
+        lines.extend(scan_chunk(ctx, &files[next..end], name, threads));
+        next = end;
     }
-    let total = lines.len();
+    // 読んだ塊の中の超過行は数えない。残りのファイルがあるとき、件数は下限にしかならない。
+    let unread = next < files.len();
+    let total = if unread {
+        limit.min(lines.len())
+    } else {
+        lines.len()
+    };
     lines.truncate(limit);
     let found = emit(out, err, &lines, total)?;
-    let rest = files[next..]
-        .iter()
-        .filter(|p| candidate(ctx, p, name.as_bytes()).is_some())
-        .count();
-    if rest > 0 {
-        writeln!(err, "… {rest} more files")?;
+    if unread {
+        writeln!(err, "… more files may match")?;
     }
     Ok(found)
+}
+
+/// `files` の参照行を、経路順のまま返す。
+fn scan_chunk(ctx: &Ctx, files: &[Vec<u8>], name: &str, threads: usize) -> Vec<Vec<u8>> {
+    let per = files.len().div_ceil(threads).max(1);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = files
+            .chunks(per)
+            .map(|part| {
+                s.spawn(move || {
+                    part.iter()
+                        .flat_map(|p| scan_file(ctx, p, name))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("scan thread panicked"))
+            .collect()
+    })
+}
+
+fn scan_file(ctx: &Ctx, path: &[u8], name: &str) -> Vec<Vec<u8>> {
+    let Some((lang, src)) = candidate(ctx, path, name.as_bytes()) else {
+        return Vec::new();
+    };
+    let defs = extract(lang, &src);
+    extract_refs(lang, &src, &defs)
+        .iter()
+        .filter(|r| r.name == name)
+        .map(|r| render(ctx, &Hit::new(path, r), Some(&src)))
+        .collect()
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {

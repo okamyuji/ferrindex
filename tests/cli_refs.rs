@@ -117,7 +117,7 @@ fn limit_and_more_line() {
 }
 
 #[test]
-fn refs_report_remaining_files() {
+fn refs_count_the_excess_when_every_file_was_read() {
     let r = Repo::new();
     for f in ["a", "b", "c"] {
         r.write(&format!("{f}.rs"), "fn x() {\n    target();\n}\n");
@@ -125,7 +125,7 @@ fn refs_report_remaining_files() {
     r.write("d.rs", "fn unrelated() {}\n");
     let o = r.run(&["refs", "target", "--limit", "1"]);
     assert_eq!(o.lines(), ["a.rs:2:5 call in x\ttarget();"]);
-    assert_eq!(o.err, "… 2 more files\n");
+    assert_eq!(o.err, "… 2 more\n");
 }
 
 #[test]
@@ -185,4 +185,23 @@ fn bad_arguments_exit_2() {
     assert_eq!(r.run(&["refs", "a", "b"]).code, 2);
     assert_eq!(r.run(&["refs", "  "]).code, 2);
     assert_eq!(r.run(&["refs", "target", "--precise"]).code, 2);
+}
+
+#[test]
+fn refs_keep_path_order_across_parallel_batches() {
+    let r = Repo::new();
+    for i in 0..1000 {
+        r.write(&format!("d{i:03}.rs"), "fn x() {\n    target();\n}\n");
+    }
+    let o = r.run(&["refs", "target", "--limit", "300"]);
+    let paths: Vec<String> = o
+        .lines()
+        .iter()
+        .map(|l| l.split(':').next().unwrap().to_string())
+        .collect();
+    let want: Vec<String> = (0..300).map(|i| format!("d{i:03}.rs")).collect();
+    assert_eq!(paths, want);
+    assert_eq!(o.err, "… more files may match\n");
+    let all = r.run(&["refs", "target", "--limit", "1000"]);
+    assert_eq!((all.lines().len(), all.err.as_str()), (1000, ""));
 }
