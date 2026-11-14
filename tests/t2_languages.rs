@@ -50,7 +50,7 @@ fn rust_defs_and_bodies() {
         row(&r, "norm"),
         "method",
         6,
-        None,
+        Some("Point"),
         "fn norm(&self) -> i32 {\n        self.x\n    }",
     );
     check(
@@ -184,7 +184,7 @@ fn go_defs_and_bodies() {
         row(&r, "Start"),
         "method",
         7,
-        None,
+        Some("Server"),
         "func (s *Server) Start() int {\n\treturn s.port\n}",
     );
     check(
@@ -367,7 +367,7 @@ fn lua_defs_and_bodies() {
         row(&r, "top"),
         "function",
         3,
-        None,
+        Some("M"),
         "function M.top(a)\n  return a + 1\nend",
     );
     // table 全体ではなく `run = function ... end` のフィールドだけを返す
@@ -510,4 +510,92 @@ fn many_nested_and_flat_holders_get_the_right_container() {
     assert_eq!(c("m17"), Some("m16".into()));
     assert_eq!(c("f19999"), None);
     assert_eq!(d.len(), depth + 1 + 40_000);
+}
+
+fn container_of(lang: Lang, src: &str, name: &str) -> Option<String> {
+    let d = defs_of(lang, src);
+    d.iter()
+        .find(|d| d.name == name)
+        .unwrap_or_else(|| panic!("{name}: {d:?}"))
+        .container
+        .clone()
+}
+
+#[test]
+fn rust_impl_methods_get_the_impl_type() {
+    let c = |src: &str| container_of(Lang::Rust, src, "m");
+    assert_eq!(c("struct Foo;\nimpl Foo { fn m() {} }"), Some("Foo".into()));
+    assert_eq!(c("impl<T> Foo<T> { fn m() {} }"), Some("Foo".into()));
+    assert_eq!(c("impl Tr for X { fn m() {} }"), Some("X".into()));
+    assert_eq!(c("mod a { impl Foo { fn m() {} } }"), Some("Foo".into()));
+    assert_eq!(c("impl a::Foo { fn m() {} }"), Some("Foo".into()));
+    assert_eq!(c("trait T { fn m() {} }"), Some("T".into()));
+    // impl の中の関数の中の関数は impl の直下ではない
+    assert_eq!(
+        container_of(Lang::Rust, "impl Foo { fn o() { fn n() {} } }", "n"),
+        None
+    );
+    assert_eq!(c("mod a { fn m() {} }"), Some("a".into()));
+}
+
+#[test]
+fn go_receiver_methods_get_the_receiver_type() {
+    let c = |src: &str| container_of(Lang::Go, src, "Run");
+    assert_eq!(
+        c("package p\nfunc (s *Server) Run() {}"),
+        Some("Server".into())
+    );
+    assert_eq!(
+        c("package p\nfunc (Server) Run() {}"),
+        Some("Server".into())
+    );
+    assert_eq!(
+        c("package p\nfunc (s *Server[T]) Run() {}"),
+        Some("Server".into())
+    );
+    assert_eq!(c("package p\nfunc Run() {}"), None);
+}
+
+#[test]
+fn cpp_qualified_methods_get_the_scope() {
+    let c = |src: &str| container_of(Lang::Cpp, src, "f");
+    assert_eq!(c("void A::f() {}"), Some("A".into()));
+    assert_eq!(c("namespace n { void A::f() {} }"), Some("A".into()));
+    assert_eq!(c("void f() {}"), None);
+}
+
+#[test]
+fn swift_extension_methods_get_the_extended_type() {
+    let c = |src: &str, n: &str| container_of(Lang::Swift, src, n);
+    assert_eq!(
+        c("extension K {\n    func f() {}\n}\n", "f"),
+        Some("K".into())
+    );
+    assert_eq!(
+        c("extension K {\n    class N {}\n}\n", "N"),
+        Some("K".into())
+    );
+    assert_eq!(c("class C {\n    func f() {}\n}\n", "f"), Some("C".into()));
+    assert_eq!(c("func f() {}\n", "f"), None);
+}
+
+#[test]
+fn lua_qualified_functions_get_the_table() {
+    let c = |src: &str| container_of(Lang::Lua, src, "f");
+    assert_eq!(c("function M.f() end"), Some("M".into()));
+    assert_eq!(c("function M:f() end"), Some("M".into()));
+    assert_eq!(c("function a.b.f() end"), Some("b".into()));
+    assert_eq!(c("M.f = function() end"), Some("M".into()));
+    assert_eq!(c("function f() end"), None);
+}
+
+#[test]
+fn ruby_singleton_and_js_prototype_methods_get_their_owner() {
+    let r = |src: &str| container_of(Lang::Ruby, src, "f");
+    assert_eq!(r("def Foo.f\nend\n"), Some("Foo".into()));
+    assert_eq!(r("class K\n  def self.f\n  end\nend\n"), Some("K".into()));
+    let j = |src: &str| container_of(Lang::JavaScript, src, "f");
+    assert_eq!(j("Foo.prototype.f = function() {};"), Some("Foo".into()));
+    assert_eq!(j("Foo.f = function() {};"), Some("Foo".into()));
+    assert_eq!(j("f = function() {};"), None);
 }

@@ -41,6 +41,7 @@ fn tag_defs(lang: Lang, src: &[u8]) -> Option<Vec<Def>> {
 
     let mut defs = Vec::new();
     let mut names: Vec<Range<usize>> = Vec::new();
+    let mut outer: Vec<Option<String>> = Vec::new();
     for tag in tags {
         let Ok(tag) = tag else { continue };
         if !tag.is_definition {
@@ -63,10 +64,11 @@ fn tag_defs(lang: Lang, src: &[u8]) -> Option<Vec<Def>> {
             body: body.start_byte()..body.end_byte(),
         });
         names.push(tag.name_range);
+        outer.push(outer_type(lang, body, name_node, src));
     }
     let containers = containers(&defs, &names);
-    for (d, c) in defs.iter_mut().zip(containers) {
-        d.container = c;
+    for (d, (inner, out)) in defs.iter_mut().zip(containers.into_iter().zip(outer)) {
+        d.container = out.or(inner);
     }
     Some(defs)
 }
@@ -102,6 +104,64 @@ fn containers(defs: &[Def], names: &[Range<usize>]) -> Vec<Option<String>> {
         stack.extend(own);
     }
     out
+}
+
+/// 型の本体の外に書かれるメソッドの所属型（Rust の impl、Go のレシーバ、C++ の `A::f`、
+/// Swift の extension、Lua の `T.f` / `T:f`、Ruby の `def T.f`、JS の `T.prototype.f = ...`）。
+fn outer_type(lang: Lang, body: Node<'_>, name: Node<'_>, src: &[u8]) -> Option<String> {
+    let owner = match lang {
+        Lang::Rust => {
+            let imp = body
+                .parent()
+                .filter(|p| p.kind() == "declaration_list")?
+                .parent()
+                .filter(|p| p.kind() == "impl_item")?;
+            imp.child_by_field_name("type")?
+        }
+        Lang::Go => body.child_by_field_name("receiver")?,
+        Lang::Cpp => name
+            .parent()
+            .filter(|p| p.kind() == "qualified_identifier")?
+            .child_by_field_name("scope")?,
+        Lang::Swift => ancestor(body, |p| {
+            matches!(p.kind(), "class_declaration" | "protocol_declaration")
+        })?
+        .child_by_field_name("name")?,
+        Lang::Lua => {
+            let table = name
+                .parent()
+                .filter(|p| matches!(p.kind(), "dot_index_expression" | "method_index_expression"))?
+                .child_by_field_name("table")?;
+            // `a.b.f` の所属は最も近い `b`
+            table.child_by_field_name("field").unwrap_or(table)
+        }
+        // `def self.f` の object は self なので型名が見つからず、囲む class のままになる
+        Lang::Ruby => body.child_by_field_name("object")?,
+        // `Foo.prototype.f` の最初の識別子は Foo
+        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => name
+            .parent()
+            .filter(|p| p.kind() == "member_expression")?
+            .child_by_field_name("object")?,
+        _ => return None,
+    };
+    first_type_name(owner, src, lang)
+}
+
+/// 型名の最初の識別子。ジェネリクスや `*`、`&` は読み飛ばす。
+fn first_type_name(n: Node<'_>, src: &[u8], lang: Lang) -> Option<String> {
+    // Go のレシーバ名や Rust のパスなど、型名でない identifier を拾わない言語を分ける
+    let ident = match lang {
+        Lang::Lua | Lang::JavaScript | Lang::TypeScript | Lang::Tsx => "identifier",
+        Lang::Ruby => "constant",
+        Lang::Cpp => "namespace_identifier",
+        _ => "type_identifier",
+    };
+    if n.kind() == ident {
+        return Some(String::from_utf8_lossy(&src[n.byte_range()]).into_owned());
+    }
+    let mut cursor = n.walk();
+    n.named_children(&mut cursor)
+        .find_map(|c| first_type_name(c, src, lang))
 }
 
 /// 範囲が同じ入れ子のノードの一番外側（Dart は method_signature と function_signature が同じ範囲になる）。
