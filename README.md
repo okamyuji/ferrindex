@@ -116,3 +116,7 @@ git リポジトリの外や入力の誤りでは何も出力しません。い�
 1. `settings.json` から `ferrindex hook session-start` の項目を消します。
 2. `cargo uninstall ferrindex` を実行します。
 3. 索引のキャッシュディレクトリ `$XDG_CACHE_HOME/ferrindex`（未設定なら `~/.cache/ferrindex`）を削除します。
+
+## ライセンス
+
+MIT ライセンスです。全文は `LICENSE` を参照してください。
