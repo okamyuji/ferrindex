@@ -314,12 +314,12 @@ fn types_at(ctx: &Ctx, root: &Path, found: &[Location]) -> Res<Vec<TypeAt>> {
             let Some(real) = real_rel(root, rel)? else {
                 return Ok(None);
             };
-            let Some((src, defs, _)) =
+            let Some((src, defs, _, starts)) =
                 cached(&mut parsed, real.clone(), || parse(ctx, &real))?.as_ref()
             else {
                 return Ok(None);
             };
-            let offset = byte_offset(src, loc.line, loc.col);
+            let offset = byte_offset(src, starts, loc.line, loc.col);
             let def = defs
                 .iter()
                 .find(|d| (d.line, d.col) == (loc.line, loc.col))
@@ -373,7 +373,7 @@ fn misses_an_inherit(
 fn bases(ctx: &Ctx, defs: &[Found]) -> Res<Vec<String>> {
     let mut out = Vec::new();
     for d in defs {
-        let Some((_, _, refs)) = parse(ctx, Path::new(OsStr::from_bytes(&d.path)))? else {
+        let Some((_, _, refs, _)) = parse(ctx, Path::new(OsStr::from_bytes(&d.path)))? else {
             continue;
         };
         let owners = Owners::of([d]);
@@ -441,7 +441,8 @@ fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8, limit: usize) 
         let Some(real) = real_rel(root, rel)? else {
             continue;
         };
-        let Some((src, defs, refs)) = cached(&mut parsed, real.clone(), || parse(ctx, &real))?
+        let Some((src, defs, refs, starts)) =
+            cached(&mut parsed, real.clone(), || parse(ctx, &real))?
         else {
             continue;
         };
@@ -454,7 +455,7 @@ fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8, limit: usize) 
             .iter()
             .find(|r| (r.line, r.col) == at)
             .map_or(plain, |r| r.kind);
-        let offset = byte_offset(src, loc.line, loc.col);
+        let offset = byte_offset(src, starts, loc.line, loc.col);
         // 位置が定義の名前そのもの（impls や supers の答え）なら、その定義は囲みに数えない。
         let container = defs
             .iter()
@@ -473,38 +474,45 @@ fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8, limit: usize) 
     Ok((lines, total))
 }
 
-/// ファイルの内容と、抽出し直した定義と参照。
-type Parsed = (Vec<u8>, Vec<Def>, Vec<Ref>);
+/// ファイルの内容と、抽出し直した定義と参照と、各行の先頭のバイト位置。
+type Parsed = (Vec<u8>, Vec<Def>, Vec<Ref>, Vec<usize>);
 
 /// 言語の決まらないファイル（サーバーが返した設定ファイルなど）は、定義と参照を空にして行だけ出す。
 fn parse(ctx: &Ctx, rel: &Path) -> Res<Option<Parsed>> {
     let Some(src) = read_rel(&ctx.root, rel.as_os_str().as_bytes())? else {
         return Ok(None);
     };
+    let starts = line_starts(&src);
     let Some(lang) = lang_of(rel) else {
-        return Ok(Some((src, Vec::new(), Vec::new())));
+        return Ok(Some((src, Vec::new(), Vec::new(), starts)));
     };
     let defs = extract(lang, &src);
     let refs = extract_refs(lang, &src, &defs);
-    Ok(Some((src, defs, refs)))
+    Ok(Some((src, defs, refs, starts)))
 }
 
-/// 1 始まりの行と、1 始まりで UTF-16 単位の列を、バイト位置にする。
-fn byte_offset(src: &[u8], line: u32, col: u32) -> usize {
-    let start: usize = src
-        .split_inclusive(|&b| b == b'\n')
-        .take(line.saturating_sub(1) as usize)
-        .map(<[u8]>::len)
-        .sum();
-    let rest = String::from_utf8_lossy(&src[start..]);
+fn line_starts(src: &[u8]) -> Vec<usize> {
+    let ends = src.iter().enumerate().filter(|&(_, &b)| b == b'\n');
+    std::iter::once(0).chain(ends.map(|(i, _)| i + 1)).collect()
+}
+
+/// 1 始まりの行と、1 始まりで UTF-16 単位の列を、バイト位置にする。`starts` は line_starts の値。
+/// 答えの全件について呼ぶので、その行の中だけを数える。
+fn byte_offset(src: &[u8], starts: &[usize], line: u32, col: u32) -> usize {
+    let at = line.saturating_sub(1) as usize;
+    let Some(&start) = starts.get(at) else {
+        return src.len();
+    };
+    let end = starts.get(at + 1).map_or(src.len(), |&next| next - 1);
+    let text = String::from_utf8_lossy(&src[start..end]);
     let mut units = 1;
-    for (i, c) in rest.char_indices() {
-        if units >= col as usize || c == '\n' {
+    for (i, c) in text.char_indices() {
+        if units >= col as usize {
             return start + i;
         }
         units += c.len_utf16();
     }
-    src.len()
+    end
 }
 
 fn kind_word(kind: u8) -> &'static str {
@@ -613,7 +621,7 @@ fn supers(
     }
     let (mut lines, mut total) = (Vec::new(), 0);
     for (path, ds) in by_file {
-        let Some((src, _, refs)) = parse(ctx, Path::new(OsStr::from_bytes(path)))? else {
+        let Some((src, _, refs, _)) = parse(ctx, Path::new(OsStr::from_bytes(path)))? else {
             continue;
         };
         let owners = Owners::of(ds);
@@ -766,15 +774,22 @@ mod tests {
     #[test]
     fn byte_offset_counts_utf16_columns() {
         let src = "ab\n\u{3042}\u{1F600}x\n".as_bytes();
-        assert_eq!(byte_offset(src, 1, 1), 0);
-        assert_eq!(byte_offset(src, 1, 2), 1);
-        assert_eq!(byte_offset(src, 2, 1), 3);
-        assert_eq!(byte_offset(src, 2, 2), 6);
+        let at = |line, col| byte_offset(src, &line_starts(src), line, col);
+        assert_eq!(at(1, 1), 0);
+        assert_eq!(at(1, 2), 1);
+        assert_eq!(at(2, 1), 3);
+        assert_eq!(at(2, 2), 6);
         // 絵文字は UTF-16 で 2 単位、UTF-8 で 4 バイト。
-        assert_eq!(byte_offset(src, 2, 4), 10);
+        assert_eq!(at(2, 4), 10);
         // 行末より右の列は行末に寄せる。
-        assert_eq!(byte_offset(src, 1, 9), 2);
-        assert_eq!(byte_offset(src, 9, 1), src.len());
+        assert_eq!(at(1, 9), 2);
+        assert_eq!(at(9, 1), src.len());
+        assert_eq!(at(3, 5), src.len());
+        // 行 0 は行 1 と同じに扱う。
+        assert_eq!(at(0, 2), 1);
+        // 改行で終わらない最後の行の行末は、ファイルの末尾。
+        let tail = b"ab\ncd";
+        assert_eq!(byte_offset(tail, &line_starts(tail), 2, 9), tail.len());
     }
 
     #[test]

@@ -11,7 +11,7 @@
 # FAKE_FAIL に method 名があれば、その要求にエラーで答える。
 # FAKE_REFS は references、implementation、supertypes の答え（[[パス, 0始まりの行, 0始まりの列], ...] の JSON）。相対パスは根からの相対。
 # references では {"問うた行 列": [...]} の形で、問うた位置ごとに答えを変えられる。
-# FAKE_REFS_RUN は references の答えを「パス 0始まりの行 最初の列 列の間隔 件数」で並べる。
+# FAKE_REFS_RUN は references と implementation の答えを「パス 0始まりの行 最初の列 列の間隔 件数 [行の間隔]」で並べる。
 # 1つの環境変数に入りきらない数の答えを返すときに使う。
 # FAKE_LOG があれば、位置を問う要求ごとに「method 行 列」を1行足す。
 import json
@@ -65,6 +65,13 @@ def reply(msg, result):
 def rng(line, character):
     pos = {"line": line, "character": character}
     return {"start": pos, "end": pos}
+
+
+def refs_run():
+    p, line, ch, step, n, *line_step = os.environ["FAKE_REFS_RUN"].split()
+    down = int(line_step[0]) if line_step else 0
+    return [{"uri": root + "/" + p, "range": rng(int(line) + i * down, int(ch) + i * int(step))}
+            for i in range(int(n))]
 
 
 answers = {}
@@ -137,9 +144,7 @@ while True:
                 pos = params["position"]
                 f.write("%s %d %d\n" % (method, pos["line"], pos["character"]))
         if os.environ.get("FAKE_REFS_RUN"):
-            p, line, ch, step, n = os.environ["FAKE_REFS_RUN"].split()
-            reply(m, [{"uri": root + "/" + p, "range": rng(int(line), int(ch) + i * int(step))}
-                      for i in range(int(n))])
+            reply(m, refs_run())
             continue
         if os.environ.get("FAKE_REFS"):
             refs = json.loads(os.environ["FAKE_REFS"])
@@ -169,6 +174,8 @@ while True:
         here = {"uri": params["textDocument"]["uri"],
                 "range": rng(params["position"]["line"], params["position"]["character"])}
         reply(m, [here, {"uri": root + "/src/a%20b.rs", "range": rng(9, 0)}])
+    elif method == "textDocument/implementation" and os.environ.get("FAKE_REFS_RUN"):
+        reply(m, refs_run())
     elif method == "textDocument/implementation" and os.environ.get("FAKE_REFS"):
         reply(m, [{"uri": p if p.startswith("file:") else root + "/" + p, "range": rng(line, ch)}
                   for p, line, ch in json.loads(os.environ["FAKE_REFS"])])

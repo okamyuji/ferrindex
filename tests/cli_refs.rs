@@ -1199,3 +1199,36 @@ fn refs_read_core_count_times_16_files_per_chunk() {
     let o = r.run(&["refs", "target", "--limit", "2"]);
     assert_eq!((o.lines().len(), o.err.as_str()), (2, ""));
 }
+
+/// impls と supers は答えの全件に型を求める。答えのファイルの行頭は一度だけ求め、列は行の中だけを
+/// 数えるので、答えの数を 4 倍にしても時間はほぼ 4 倍に収まる。答えごとにファイルを先頭から
+/// 数えると、答えの数と行の数の積で伸びる。サーバーとのやり取りには答えの数によらない1秒ほどの
+/// 待ちがあるので、小さい側でも走査の重さがそれを上回る数にする。
+#[test]
+fn types_of_precise_answers_take_linear_time() {
+    let time = |n: usize| {
+        let r = Repo::new();
+        let lines = "//\n".repeat(n);
+        r.write("a.rs", &format!("trait T {{}}\nfn y() {{\n{lines}}}\n"));
+        assert_eq!(r.run(&["update"]).code, 0);
+        // 3 行目から 1 行に 1 件ずつ、行頭に並べる
+        let answers = format!("a.rs 2 0 0 {n} 1");
+        let start = std::time::Instant::now();
+        let o = precise(
+            &r,
+            &[("FAKE_REFS_RUN", &answers)],
+            &["impls", "T", "--precise", "--limit", "1"],
+        );
+        let took = start.elapsed();
+        assert_eq!(o.lines(), ["a.rs:3:1 inherit in y\t//"], "{}", o.err);
+        assert_eq!(o.err, format!("… {} more\n", n - 1));
+        took
+    };
+    time(100);
+    // 機械の負荷の揺れで偽の失敗を出さないよう、3回の最小値で比べる
+    let best = |n| (0..3).map(|_| time(n)).min().unwrap();
+    let small = best(10000);
+    let large = best(40000);
+    // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
+    assert!(large < small * 8, "{small:?} -> {large:?}");
+}
