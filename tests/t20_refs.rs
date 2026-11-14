@@ -6,10 +6,15 @@ struct Case {
     lang: Lang,
     path: &'static str,
     call_line: u32,
-    inherit: Option<(u32, u8)>,
+    inherit: &'static [(u32, u8)],
 }
 
-const fn case(lang: Lang, path: &'static str, call_line: u32, inherit: Option<(u32, u8)>) -> Case {
+const fn case(
+    lang: Lang,
+    path: &'static str,
+    call_line: u32,
+    inherit: &'static [(u32, u8)],
+) -> Case {
     Case {
         lang,
         path,
@@ -19,30 +24,35 @@ const fn case(lang: Lang, path: &'static str, call_line: u32, inherit: Option<(u
 }
 
 const CASES: [Case; 14] = [
-    case(Lang::Rust, "rust/main.rs", 6, None),
-    case(Lang::Go, "go/main.go", 8, None),
-    case(Lang::Python, "python/main.py", 9, Some((4, REF_INHERIT))),
+    case(Lang::Rust, "rust/main.rs", 6, &[]),
+    case(Lang::Go, "go/main.go", 8, &[]),
+    case(Lang::Python, "python/main.py", 9, &[(4, REF_INHERIT)]),
     case(
         Lang::JavaScript,
         "javascript/main.js",
         8,
-        Some((4, REF_INHERIT)),
+        &[(4, REF_INHERIT)],
     ),
     case(
         Lang::TypeScript,
         "typescript/main.ts",
         8,
-        Some((4, REF_INHERIT)),
+        &[(4, REF_INHERIT)],
     ),
-    case(Lang::Tsx, "tsx/main.tsx", 8, Some((4, REF_INHERIT))),
-    case(Lang::Java, "java/Main.java", 7, Some((4, REF_INHERIT))),
-    case(Lang::CSharp, "csharp/Main.cs", 7, Some((4, REF_INHERIT))),
-    case(Lang::Ruby, "ruby/main.rb", 9, Some((4, REF_INHERIT))),
-    case(Lang::C, "c/main.c", 6, None),
-    case(Lang::Cpp, "cpp/main.cpp", 8, Some((4, REF_INHERIT))),
-    case(Lang::Swift, "swift/main.swift", 8, Some((4, REF_INHERIT))),
-    case(Lang::Lua, "lua/main.lua", 6, None),
-    case(Lang::Dart, "dart/main.dart", 8, Some((4, REF_INHERIT))),
+    case(Lang::Tsx, "tsx/main.tsx", 8, &[(4, REF_INHERIT)]),
+    case(Lang::Java, "java/Main.java", 7, &[(4, REF_INHERIT)]),
+    case(Lang::CSharp, "csharp/Main.cs", 7, &[(4, REF_INHERIT)]),
+    case(Lang::Ruby, "ruby/main.rb", 9, &[(4, REF_INHERIT)]),
+    case(Lang::C, "c/main.c", 6, &[]),
+    case(Lang::Cpp, "cpp/main.cpp", 8, &[(4, REF_INHERIT)]),
+    case(Lang::Swift, "swift/main.swift", 8, &[(4, REF_INHERIT)]),
+    case(Lang::Lua, "lua/main.lua", 6, &[]),
+    case(
+        Lang::Dart,
+        "dart/main.dart",
+        8,
+        &[(4, REF_INHERIT), (11, REF_INHERIT)],
+    ),
 ];
 
 fn refs_of(lang: Lang, src: &[u8]) -> Vec<Ref> {
@@ -83,15 +93,15 @@ fn each_language_finds_calls_but_not_comments_or_strings() {
         lines.sort();
         let mut want: Vec<u32> = c
             .inherit
-            .map(|(l, _)| l)
-            .into_iter()
+            .iter()
+            .map(|&(l, _)| l)
             .chain([c.call_line])
             .collect();
         want.sort();
         assert_eq!(lines, want, "{:?}", c.lang);
         let call = found.iter().find(|r| r.line == c.call_line).unwrap();
         assert_eq!(call.kind, REF_CALL, "{:?}", c.lang);
-        if let Some((l, kind)) = c.inherit {
+        for &(l, kind) in c.inherit {
             let inherit = found.iter().find(|r| r.line == l).unwrap();
             assert_eq!(inherit.kind, kind, "{:?}", c.lang);
         }
@@ -224,4 +234,55 @@ fn base_classes_are_inherit_references() {
     assert!(py.contains(&("A".into(), REF_INHERIT)));
     let cpp = kinds(Lang::Cpp, "class B : public A {};\n");
     assert!(cpp.contains(&("A".into(), REF_INHERIT)));
+}
+
+#[test]
+fn dart_implements_and_mixins_are_inherit_references() {
+    let k = kinds(
+        Lang::Dart,
+        "class A extends Base with Mix implements Iface {}\n",
+    );
+    assert!(k.contains(&("Iface".into(), REF_INHERIT)));
+}
+
+#[test]
+fn receiver_is_plain_and_member_name_is_call() {
+    let cases = [
+        (Lang::Go, "func g() {\n\tobj.method()\n\ta.b.c()\n}\n"),
+        (Lang::Python, "def g():\n    obj.method()\n    a.b.c()\n"),
+        (
+            Lang::JavaScript,
+            "function g() { obj.method(); a.b.c(); }\n",
+        ),
+        (Lang::Cpp, "void g() { obj.method(); a.b.c(); p->m(); }\n"),
+        (Lang::Ruby, "def g\n  obj.method()\n  a.b.c()\nend\n"),
+        (Lang::Rust, "fn g() { obj.method(); a.b.c(); m::f(); }\n"),
+    ];
+    for (lang, src) in cases {
+        let k = kinds(lang, src);
+        let kind_of = |n: &str| k.iter().find(|(m, _)| m == n).unwrap().1;
+        assert_eq!(kind_of("obj"), REF_PLAIN, "{lang:?} obj");
+        assert_eq!(kind_of("method"), REF_CALL, "{lang:?} method");
+        assert_eq!(kind_of("a"), REF_PLAIN, "{lang:?} a");
+        assert_eq!(kind_of("b"), REF_PLAIN, "{lang:?} b");
+        assert_eq!(kind_of("c"), REF_CALL, "{lang:?} c");
+    }
+}
+
+#[test]
+fn qualified_call_keeps_the_function_name_as_call() {
+    let k = kinds(Lang::Rust, "fn g() { m::f(); }\n");
+    assert!(k.contains(&("f".into(), REF_CALL)));
+    assert!(k.contains(&("m".into(), REF_PLAIN)));
+}
+
+#[test]
+fn dart_local_function_is_a_definition_and_a_container() {
+    let src = b"void m() { void nested() { deep(q); } }\n";
+    let defs = extract(Lang::Dart, src);
+    assert!(defs.iter().any(|d| d.name == "nested"));
+    let refs = extract_refs(Lang::Dart, src, &defs);
+    assert!(!refs.iter().any(|r| r.name == "nested"));
+    let deep = refs.iter().find(|r| r.name == "deep").unwrap();
+    assert_eq!(deep.container.as_deref(), Some("nested"));
 }

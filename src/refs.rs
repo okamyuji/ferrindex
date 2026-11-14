@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::HashSet;
 
-use tree_sitter::Parser;
+use tree_sitter::{Parser, TreeCursor};
 
 use crate::extract::Def;
 use crate::lang::{Lang, tags_config};
@@ -25,7 +25,7 @@ pub struct Ref {
 /// 分類のために見る祖先の段数。入れ子が深い入力でも一つの参照の分類を定数時間にする。
 const CLASSIFY_DEPTH: usize = 3;
 const CALL_WORDS: [&str; 3] = ["call", "invocation", "send"];
-const INHERIT_WORDS: [&str; 9] = [
+const INHERIT_WORDS: [&str; 10] = [
     "superclass",
     "extends",
     "implements",
@@ -35,6 +35,7 @@ const INHERIT_WORDS: [&str; 9] = [
     "super_interfaces",
     "delegation_specifier",
     "base_class",
+    "interfaces",
 ];
 
 /// UTF-8 でない入力と Markdown は空を返す。
@@ -59,7 +60,9 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
     let mut refs = Vec::new();
     let mut cursor = tree.walk();
     // 木の再帰では深い入れ子でスタックが溢れるので、祖先の種類は自前のスタックに持つ
-    let mut ancestors: Vec<(&str, Option<&str>)> = Vec::new();
+    let mut ancestors: Vec<Step> = Vec::new();
+    // 各階層で、いまの節点より後ろにある名前付きの兄弟の数。next_named_sibling は根からたどるので使わない
+    let mut afters: Vec<usize> = vec![0];
     loop {
         let node = cursor.node();
         if node.child_count() == 0 && node.is_named() && is_reference_kind(node.kind()) {
@@ -78,25 +81,42 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
                     name: String::from_utf8_lossy(&src[start..node.end_byte()]).into_owned(),
                     line,
                     col,
-                    kind: classify(&ancestors),
+                    kind: classify(&ancestors, step(&cursor, &afters)),
                     container: open.last().map(|&i| defs[i].name.clone()),
                 });
             }
         }
-        let field = cursor.field_name();
+        let here = step(&cursor, &afters);
         if cursor.goto_first_child() {
-            ancestors.push((node.kind(), field));
+            ancestors.push(here);
+            let named = node.named_child_count() - usize::from(cursor.node().is_named());
+            afters.push(named);
             continue;
         }
         loop {
             if cursor.goto_next_sibling() {
+                if cursor.node().is_named()
+                    && let Some(n) = afters.last_mut()
+                {
+                    *n -= 1;
+                }
                 break;
             }
             if !cursor.goto_parent() {
                 return Some(refs);
             }
             ancestors.pop();
+            afters.pop();
         }
+    }
+}
+
+fn step<'a>(cursor: &TreeCursor<'a>, afters: &[usize]) -> Step<'a> {
+    let node = cursor.node();
+    Step {
+        kind: node.kind(),
+        field: cursor.field_name(),
+        last: afters.last() == Some(&0),
     }
 }
 
@@ -104,22 +124,54 @@ fn is_reference_kind(kind: &str) -> bool {
     kind.ends_with("identifier") || kind == "constant"
 }
 
-/// 祖先は (種類, 親の中のフィールド名)。引数の中の識別子は呼び出しではないので、`argument` を通ったら打ち切る。
+/// 木の一つの節点。`field` は親の中のフィールド名、`last` は親の最後の名前付きの子かどうか。
+#[derive(Clone, Copy)]
+struct Step<'a> {
+    kind: &'a str,
+    field: Option<&'a str>,
+    last: bool,
+}
+
+const MEMBER_WORDS: [&str; 7] = [
+    "member",
+    "field_expression",
+    "selector_expression",
+    "navigation",
+    "attribute",
+    "scoped_identifier",
+    "qualified",
+];
+
+/// 引数の中の識別子と `obj.method()` の `obj` は呼び出しではない。
+/// `argument` を通ったら打ち切り、メンバー参照では最後の名前だけを先へ進める。
+/// Ruby の `call` は receiver と method を子に持つので、`receiver` フィールドで受け手を見分ける。
 /// Python の基底クラスは `class_definition` の `superclasses` フィールドの argument_list に入る。
-fn classify(ancestors: &[(&str, Option<&str>)]) -> u8 {
-    for (kind, field) in ancestors.iter().rev().take(CLASSIFY_DEPTH) {
-        if *field == Some("superclasses") {
-            return REF_INHERIT;
-        }
-        if kind.contains("argument") {
+fn classify(ancestors: &[Step], leaf: Step) -> u8 {
+    let mut below = leaf;
+    for a in ancestors.iter().rev().take(CLASSIFY_DEPTH) {
+        if below.field == Some("receiver") {
             return REF_PLAIN;
         }
-        if CALL_WORDS.iter().any(|w| kind.contains(w)) {
-            return REF_CALL;
-        }
-        if INHERIT_WORDS.iter().any(|w| kind.contains(w)) {
+        if a.field == Some("superclasses") {
             return REF_INHERIT;
         }
+        if a.kind.contains("argument") {
+            return REF_PLAIN;
+        }
+        if !below.last && MEMBER_WORDS.iter().any(|w| a.kind.contains(w)) {
+            return REF_PLAIN;
+        }
+        if CALL_WORDS.iter().any(|w| a.kind.contains(w)) {
+            return if a.field == Some("receiver") {
+                REF_PLAIN
+            } else {
+                REF_CALL
+            };
+        }
+        if INHERIT_WORDS.iter().any(|w| a.kind.contains(w)) {
+            return REF_INHERIT;
+        }
+        below = *a;
     }
     REF_PLAIN
 }

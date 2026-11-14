@@ -87,9 +87,13 @@ const JAVA_EXTRA: &str = "\
 const RUST_EXTRA: &str = "\
 (trait_item body: (declaration_list (function_signature_item name: (identifier) @name) @definition.method))";
 
+/// Dart の tags.scm は関数内の関数（`local_function_declaration`）を捕捉しない。
+const DART_EXTRA: &str = "\
+(local_function_declaration (function_signature name: (identifier) @name)) @definition.function";
+
 /// 追加した query の全文。索引の指紋の入力にする。
 pub fn extra_queries() -> String {
-    format!("{CSHARP_EXTRA}\n{GO_EXTRA}\n{JAVA_EXTRA}\n{RUST_EXTRA}")
+    format!("{CSHARP_EXTRA}\n{GO_EXTRA}\n{JAVA_EXTRA}\n{RUST_EXTRA}\n{DART_EXTRA}")
 }
 
 static CONFIGS: [OnceLock<TagsConfiguration>; Lang::ALL.len()] =
@@ -161,7 +165,7 @@ fn build(lang: Lang) -> TagsConfiguration {
         ),
         Lang::Dart => (
             tree_sitter_dart::LANGUAGE.into(),
-            tree_sitter_dart::TAGS_QUERY.into(),
+            format!("{}\n{DART_EXTRA}", tree_sitter_dart::TAGS_QUERY),
         ),
         Lang::Lua => (
             tree_sitter_lua::LANGUAGE.into(),
@@ -233,7 +237,7 @@ mod tests {
     fn extra_queries_feed_the_index_fingerprint() {
         let all = extra_queries();
         assert!(
-            [CSHARP_EXTRA, GO_EXTRA, JAVA_EXTRA, RUST_EXTRA]
+            [CSHARP_EXTRA, GO_EXTRA, JAVA_EXTRA, RUST_EXTRA, DART_EXTRA]
                 .iter()
                 .all(|q| all.contains(q))
         );

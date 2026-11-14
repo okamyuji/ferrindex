@@ -7,3 +7,5 @@ void caller() {
   var s = "target";
   target();
 }
+
+class Impl implements target {}
