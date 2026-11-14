@@ -1,7 +1,7 @@
 # 試験用の偽の言語サーバー。FAKE_MODE で振る舞いを変える。
 #   ok            通常の応答
 #   needs_answers references の前にサーバー側の要求を2つ送り、正しい返事が無ければ答えない
-#   garbage       ヘッダの無い行を出して黙る
+#   garbage       ヘッダの無い行（FAKE_GARBAGE があればその文字列）を出して黙る
 #   hang          何も答えない
 #   unsorted      references に重複を含む順不同の結果を返す
 #   growing       references の答えが問うたびに1件ずつ増え、2件で止まる
@@ -26,7 +26,7 @@ out = sys.stdout.buffer
 inp = sys.stdin.buffer
 
 if mode == "garbage":
-    out.write(b"An error has occurred. See the log file\n")
+    out.write(os.environ.get("FAKE_GARBAGE", "An error has occurred. See the log file").encode() + b"\n")
     out.flush()
     time.sleep(60)
     sys.exit(1)

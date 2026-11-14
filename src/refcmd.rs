@@ -72,7 +72,8 @@ pub(crate) fn run(
         }
         // 読み込み途中のサーバーは0件と答えうるので、0件は確定とみなさない。
         Ok(_) => "言語サーバーの答えが0件でした".to_string(),
-        Err(why) => why,
+        // 理由にはサーバーが出した文字列が入りうるので、端末の制御文字を置き換える。
+        Err(why) => String::from_utf8_lossy(&escape_control(why.as_bytes())).into_owned(),
     };
     // Go の継承は名前一致では分からないので、戻る先が無い。理由だけを出す。
     if matches!(kind, RefKind::Impls | RefKind::Supers)

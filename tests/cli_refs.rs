@@ -515,6 +515,25 @@ fn refs_keep_a_recursive_call_inside_the_queried_function() {
 }
 
 #[test]
+fn server_text_in_the_reason_line_is_escaped() {
+    let r = repo();
+    let o = precise(
+        &r,
+        &[
+            ("FAKE_MODE", "garbage"),
+            ("FAKE_GARBAGE", "\x1b]0;PWN\x07\x1b[2Jevil"),
+        ],
+        &["refs", "target", "--precise"],
+    );
+    assert!(!o.err.contains('\x1b'), "{:?}", o.err);
+    assert!(
+        o.err.contains("\\x1b]0;PWN\\x07\\x1b[2Jevil"),
+        "{:?}",
+        o.err
+    );
+}
+
+#[test]
 fn precise_belongs_to_the_reference_commands() {
     let r = repo();
     let o = r.run(&["find", "target", "--precise"]);
