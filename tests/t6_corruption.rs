@@ -88,8 +88,13 @@ fn check(name: &str, target: fn(&(PathBuf, PathBuf)) -> &PathBuf, damage: impl F
     let path = target(&files);
     let mut bytes = fs::read(path).unwrap();
     damage(&mut bytes);
-    fs::write(path, bytes).unwrap();
+    fs::write(path, &bytes).unwrap();
     assert_eq!(answers(&repo), expected(), "{name}");
+    // QUERIES が読まない区画の損傷も、開くときに見つけて作り直すか消す
+    assert!(
+        !path.exists() || fs::read(path).unwrap() != bytes,
+        "{name}: damaged file left in place"
+    );
     let (main, _) = index_files(&repo);
     assert!(main.exists(), "{name}: rebuilt");
 }
