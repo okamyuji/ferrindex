@@ -384,27 +384,47 @@ pub(crate) fn corrupt(_: Corrupt, ctx: &Ctx) -> Fail {
 /// Markdown の見出しは `.` を含み得るので、全体の完全一致を先に引く。
 /// 修飾の区切りは `::` も `.` と同じに扱う。
 pub(crate) fn resolve(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
-    let hits = view.lookup(term.as_bytes())?;
+    let hits = resolve_exact(view, term)?;
     if !hits.is_empty() {
         return Ok(hits);
     }
-    let dotted = term.replace("::", ".");
-    let (container, name) = match dotted.rsplit_once('.') {
-        Some((c, n)) if !c.is_empty() && !n.is_empty() => (Some(c), n),
-        _ => (None, dotted.as_str()),
+    let (container, name) = split_qualified(term);
+    let keep = |f: &Found| {
+        container
+            .as_ref()
+            .is_none_or(|c| f.container.as_deref() == Some(c.as_bytes()))
     };
-    let keep = |f: &Found| container.is_none_or(|c| f.container.as_deref() == Some(c.as_bytes()));
-    let mut hits = view.lookup(name.as_bytes())?;
+    let mut hits = view.lookup_substring(name.as_bytes())?;
     hits.retain(keep);
-    if hits.is_empty() {
-        hits = view.lookup_substring(name.as_bytes())?;
-        hits.retain(keep);
-    }
     if hits.is_empty() && container.is_some() {
         // `Rust 1.100` のように `.` が名前の一部のとき
         hits = view.lookup_substring(term.as_bytes())?;
     }
     Ok(hits)
+}
+
+/// 名前の完全一致と `Container.name` だけを引く。部分一致には広げない。
+pub(crate) fn resolve_exact(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
+    let hits = view.lookup(term.as_bytes())?;
+    if !hits.is_empty() {
+        return Ok(hits);
+    }
+    let (container, name) = split_qualified(term);
+    let Some(container) = container else {
+        return Ok(hits);
+    };
+    let mut hits = view.lookup(name.as_bytes())?;
+    hits.retain(|f| f.container.as_deref() == Some(container.as_bytes()));
+    Ok(hits)
+}
+
+/// `A::B.c` は（`A.B`、`c`）。区切りが無ければ（None、全体）。
+fn split_qualified(term: &str) -> (Option<String>, String) {
+    let dotted = term.replace("::", ".");
+    match dotted.rsplit_once('.') {
+        Some((c, n)) if !c.is_empty() && !n.is_empty() => (Some(c.to_string()), n.to_string()),
+        _ => (None, dotted),
+    }
 }
 
 /// `path:line:col kind Container.name`

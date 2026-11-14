@@ -575,3 +575,21 @@ fn qualified_name_keeps_the_answer_without_the_call_check() {
     assert_eq!(o.err, "");
     assert_eq!(o.lines().len(), 1, "{:?}", o.lines());
 }
+
+#[test]
+fn precise_uses_only_exact_definitions() {
+    let r = repo();
+    let log = r.xdg.with_file_name("log");
+    let o = precise(
+        &r,
+        &[
+            ("FAKE_REFS", r#"[["a.rs", 3, 4]]"#),
+            ("FAKE_LOG", log.to_str().unwrap()),
+        ],
+        &["refs", "targ", "--precise"],
+    );
+    assert!(!log.exists());
+    assert_eq!(o.code, 1);
+    assert_eq!(o.out, "");
+    assert!(o.err.contains("targの定義が見つかりません"), "{}", o.err);
+}

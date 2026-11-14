@@ -17,7 +17,7 @@ use crate::extract::{Def, extract};
 use crate::fresh::{Found, View, is_binary};
 use crate::lang::{Lang, lang_of};
 use crate::lsp::{self, Location, Method};
-use crate::query::{Ctx, Res, corrupt, emit, escape_control, resolve, source_line};
+use crate::query::{Ctx, Res, corrupt, emit, escape_control, resolve, resolve_exact, source_line};
 use crate::refs::{REF_CALL, REF_INHERIT, REF_PLAIN, Ref, extract_refs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,13 +68,17 @@ pub(crate) fn run(
             return emit(out, err, &lines, total);
         }
         // 読み込み途中のサーバーは0件と答えうるので、0件は確定とみなさない。
-        Ok(_) => "言語サーバーの答えが0件でした".to_string(),
-        Err(why) => why,
+        Ok(_) => None,
+        Err(why) => Some(why),
     };
-    // 名前一致も空なら、戻ったと告げても意味が無いので理由は出さない。
     let (mut found_out, mut found_err) = (Vec::new(), Vec::new());
     let found = name_match(ctx, view, kind, term, limit, &mut found_out, &mut found_err)?;
-    if found {
+    // 0件どうしなら答えは食い違っていないので、戻ったとは告げない。
+    let why = match why {
+        Some(why) => Some(why),
+        None => found.then(|| "言語サーバーの答えが0件でした".to_string()),
+    };
+    if let Some(why) = why {
         writeln!(err, "ferrindex: {why}。名前一致の結果です（未確定）")?;
     }
     err.write_all(&found_err)?;
@@ -141,7 +145,7 @@ fn precise_lines(
     kind: RefKind,
     term: &str,
 ) -> Res<Result<Vec<Vec<u8>>, String>> {
-    let defs = resolve(view, term).map_err(|c| corrupt(c, ctx))?;
+    let defs = resolve_exact(view, term).map_err(|c| corrupt(c, ctx))?;
     if defs.is_empty() {
         return Ok(Err(format!("{term}の定義が見つかりません")));
     }
