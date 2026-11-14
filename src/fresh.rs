@@ -78,7 +78,7 @@ pub fn rebuild_all(root: &Path) -> Result<View, Error> {
     let dir = cache_dir(root);
     locked(&dir, LOCK_TIMEOUT, || {
         let start = now_ns();
-        rebuild(root, &dir, &scan(root), start)
+        rebuild(root, &dir, &scan(root)?, start)
     })
 }
 
@@ -101,7 +101,7 @@ fn locked(
 
 fn refresh_locked(root: &Path, dir: &Path) -> io::Result<View> {
     let start = now_ns();
-    let scanned = scan(root);
+    let scanned = scan(root)?;
     match incremental(root, dir, &scanned, start)? {
         Some(view) => Ok(view),
         None => rebuild(root, dir, &scanned, start),

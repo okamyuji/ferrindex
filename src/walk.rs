@@ -1,4 +1,4 @@
-use std::{fs::Metadata, os::unix::ffi::OsStrExt, path::Path, sync::mpsc, time::UNIX_EPOCH};
+use std::{fs::Metadata, io, os::unix::ffi::OsStrExt, path::Path, sync::mpsc, time::UNIX_EPOCH};
 
 use ignore::{WalkBuilder, WalkState};
 
@@ -15,7 +15,11 @@ pub struct Scanned {
 /// git の除外規則に従って `root` 以下の通常ファイルを集める。
 /// 入れ子のリポジトリ（`.git` を持つ下位ディレクトリ）には入らない。
 /// 親ディレクトリとグローバルの除外設定は読まない（結果を利用者の環境から独立させる）。
-pub fn scan(root: &Path) -> Vec<Scanned> {
+///
+/// 読めないディレクトリなどの I/O エラーは返す。部分的な一覧を成功として返すと、
+/// 呼び出し側が「一覧に無いファイル」を削除として索引に書いてしまう。
+/// 走査中に消えたファイル（`NotFound`）と、I/O を伴わない規則の不備は無視する。
+pub fn scan(root: &Path) -> io::Result<Vec<Scanned>> {
     let (tx, rx) = mpsc::channel();
     WalkBuilder::new(root)
         .hidden(false)
@@ -33,16 +37,23 @@ pub fn scan(root: &Path) -> Vec<Scanned> {
         .run(|| {
             let tx = tx.clone();
             Box::new(move |entry| {
-                if let Some(s) = entry.ok().and_then(|e| scanned(root, &e)) {
-                    let _ = tx.send(s);
+                let item = match entry {
+                    Ok(e) => scanned(root, &e).map(Ok),
+                    Err(e) => e
+                        .io_error()
+                        .filter(|io| io.kind() != io::ErrorKind::NotFound)
+                        .map(|io| Err(io::Error::new(io.kind(), e.to_string()))),
+                };
+                if let Some(item) = item {
+                    let _ = tx.send(item);
                 }
                 WalkState::Continue
             })
         });
     drop(tx);
-    let mut files: Vec<Scanned> = rx.into_iter().collect();
+    let mut files = rx.into_iter().collect::<io::Result<Vec<Scanned>>>()?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    files
+    Ok(files)
 }
 
 fn scanned(root: &Path, entry: &ignore::DirEntry) -> Option<Scanned> {
@@ -98,6 +109,7 @@ mod tests {
 
     fn paths(root: &Path) -> Vec<String> {
         scan(root)
+            .unwrap()
             .into_iter()
             .map(|s| String::from_utf8(s.path).unwrap())
             .collect()
@@ -166,7 +178,7 @@ mod tests {
             .set_modified(when)
             .unwrap();
         assert_eq!(
-            scan(r),
+            scan(r).unwrap(),
             [Scanned {
                 path: b"a".to_vec(),
                 mtime_ns: 1_000_000_000_123,
@@ -185,7 +197,20 @@ mod tests {
             .unwrap()
             .set_modified(SystemTime::UNIX_EPOCH - Duration::from_secs(5))
             .unwrap();
-        assert_eq!(scan(t.path())[0].mtime_ns, 0);
+        assert_eq!(scan(t.path()).unwrap()[0].mtime_ns, 0);
+    }
+
+    #[test]
+    fn unreadable_directory_is_an_error() {
+        use std::{io, os::unix::fs::PermissionsExt};
+        let t = repo();
+        put(t.path(), "ok.rs", b"");
+        put(t.path(), "locked/x.rs", b"");
+        let locked = t.path().join("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let got = scan(t.path());
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]

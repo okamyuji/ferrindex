@@ -59,7 +59,7 @@ type Row = (String, u32, u32, u8, Option<String>);
 /// 走査と抽出だけで作る基準。差分の仕組みを通らない。
 fn reference(root: &Path) -> BTreeMap<String, Vec<Row>> {
     let mut out: BTreeMap<String, Vec<Row>> = BTreeMap::new();
-    for s in scan(root) {
+    for s in scan(root).unwrap() {
         let rel = String::from_utf8(s.path).unwrap();
         let Some(lang) = lang_of(Path::new(&rel)) else {
             continue;
@@ -113,7 +113,7 @@ fn assert_equals_reparse(e: &Env, v: &View, absent: &[&str]) {
         assert!(found(v, name).is_empty(), "{name} should be gone");
     }
     let listed: Vec<Vec<u8>> = v.files().into_iter().map(|(p, _)| p).collect();
-    let scanned: Vec<Vec<u8>> = scan(&e.root).into_iter().map(|s| s.path).collect();
+    let scanned: Vec<Vec<u8>> = scan(&e.root).unwrap().into_iter().map(|s| s.path).collect();
     assert_eq!(listed, scanned);
 }
 
@@ -236,7 +236,7 @@ fn vanished_between_scan_and_read_is_skipped() {
     };
     assert_eq!(entry_for(&e.root, &ghost, u64::MAX), None);
     put(&e, "real.rs", "fn real() {}\n");
-    let real = &scan(&e.root)[0];
+    let real = &scan(&e.root).unwrap()[0];
     assert!(entry_for(&e.root, real, u64::MAX).is_some());
 }
 
@@ -558,4 +558,19 @@ fn concurrent_lock_holder_times_out() {
             .contains("boom")
     );
     assert!(refresh_in(&e.root, &e.cache, Duration::from_secs(1)).is_ok());
+}
+
+#[test]
+fn unreadable_directory_fails_the_refresh_and_keeps_the_index() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = env();
+    put(&e, "a.rs", "fn top() {}\n");
+    put(&e, "sub/b.rs", "fn hidden() {}\n");
+    assert_eq!(found(&run(&e), "hidden").len(), 1);
+    let sub = e.root.join("sub");
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o000)).unwrap();
+    let err = refresh_in(&e.root, &e.cache, Duration::from_secs(5));
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(err, Err(Error::Io(_))));
+    assert_eq!(found(&run(&e), "hidden").len(), 1);
 }
