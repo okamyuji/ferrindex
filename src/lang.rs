@@ -162,6 +162,29 @@ pub fn kind_id(capture: &str) -> u8 {
     }
 }
 
+const KIND_NAMES: [&str; 12] = [
+    "other",
+    "class",
+    "constant",
+    "function",
+    "interface",
+    "macro",
+    "method",
+    "module",
+    "property",
+    "type",
+    "variable",
+    "section",
+];
+
+/// `kind_id` の逆引き。未知の番号は "other"。
+pub fn kind_name(id: u8) -> &'static str {
+    KIND_NAMES
+        .get(usize::from(id))
+        .copied()
+        .unwrap_or(KIND_NAMES[0])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,7 +228,10 @@ mod tests {
         ];
         for (id, name) in names.iter().enumerate() {
             assert_eq!(kind_id(name) as usize, id, "{name}");
+            assert_eq!(kind_name(id as u8), *name);
         }
         assert_eq!(kind_id("nope"), 0);
+        assert_eq!(kind_name(12), "other");
+        assert_eq!(kind_name(255), "other");
     }
 }

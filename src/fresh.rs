@@ -26,6 +26,8 @@ const UNCONFIRMED: u64 = u64::MAX;
 /// mtime がこれ以内に走査へ近いファイルは、同じ刻みの内の再書き込みを stat で見分けられない。
 const RACY_MARGIN_NS: u64 = 2_000_000_000;
 const NUL_SCAN_BYTES: usize = 8192;
+/// 部分一致の検索で引く名前の上限。大きな索引で出力と時間が膨らむのを止める。
+pub const MAX_SUBSTRING_NAMES: usize = 200;
 
 #[derive(Debug)]
 pub enum Error {
@@ -54,6 +56,7 @@ impl From<io::Error> for Error {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub path: Vec<u8>,
+    pub name: Vec<u8>,
     pub line: u32,
     pub col: u32,
     pub kind: u8,
@@ -70,10 +73,27 @@ pub fn refresh(root: &Path) -> Result<View, Error> {
     refresh_in(root, &cache_dir(root), LOCK_TIMEOUT)
 }
 
+/// 索引を捨てて全件を作り直す。
+pub fn rebuild_all(root: &Path) -> Result<View, Error> {
+    let dir = cache_dir(root);
+    locked(&dir, LOCK_TIMEOUT, || {
+        let start = now_ns();
+        rebuild(root, &dir, &scan(root), start)
+    })
+}
+
 /// ロックを持ったまま走査し、索引を更新し、本体と差分区画を開いて返す。
 /// 検索側は索引を自分で開かないので、本体と差分区画の世代が食い違う組は作られない。
 fn refresh_in(root: &Path, dir: &Path, timeout: Duration) -> Result<View, Error> {
-    match with_lock(dir, timeout, || refresh_locked(root, dir))? {
+    locked(dir, timeout, || refresh_locked(root, dir))
+}
+
+fn locked(
+    dir: &Path,
+    timeout: Duration,
+    f: impl FnOnce() -> io::Result<View>,
+) -> Result<View, Error> {
+    match with_lock(dir, timeout, f)? {
         Ok(view) => Ok(view?),
         Err(LockTimeout) => Err(Error::Lock),
     }
@@ -88,14 +108,20 @@ fn refresh_locked(root: &Path, dir: &Path) -> io::Result<View> {
     }
 }
 
+/// 先頭に NUL があればテキストでないとみなす。
+pub(crate) fn is_binary(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(NUL_SCAN_BYTES)].contains(&0)
+}
+
 fn now_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
+/// 書いた直後の索引が開けないときは `InvalidData`。作り直しでも直らない破損として呼び出し側が見分ける。
 fn open_after_write(path: &Path) -> io::Result<Index> {
-    Index::open(path).map_err(|e| io::Error::other(e.to_string()))
+    Index::open(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
 fn remove_if_exists(path: &Path) -> io::Result<()> {
@@ -256,7 +282,7 @@ fn entry_for(root: &Path, s: &Scanned, start: u64) -> Option<FileEntry> {
         None => (LANG_BINARY, Vec::new()),
         Some(lang) => {
             let bytes = fs::read(root.join(rel)).ok()?;
-            if bytes[..bytes.len().min(NUL_SCAN_BYTES)].contains(&0) {
+            if is_binary(&bytes) {
                 (LANG_BINARY, Vec::new())
             } else {
                 (lang as u8, extract(lang, &bytes))
@@ -299,6 +325,7 @@ fn found(idx: &Index, name: &[u8], skip: impl Fn(&[u8]) -> bool) -> Result<Vec<F
         .into_iter()
         .filter(|h| !skip(&h.path))
         .map(|h| Found {
+            name: name.to_vec(),
             container: idx.container_name(&h.row),
             line: h.row.line,
             col: h.row.col,
@@ -318,6 +345,28 @@ impl View {
         }
         out.sort_by(|a, b| (&a.path, a.line, a.col).cmp(&(&b.path, b.line, b.col)));
         Ok(out)
+    }
+
+    /// 名前に `needle` を含む定義（ASCII の大小は無視）。名前は `MAX_SUBSTRING_NAMES` 種類まで。
+    pub fn lookup_substring(&self, needle: &[u8]) -> Result<Vec<Found>, Corrupt> {
+        let names: std::collections::BTreeSet<Vec<u8>> = self
+            .parts()
+            .into_iter()
+            .flat_map(|(_, idx)| idx.names_containing(needle, MAX_SUBSTRING_NAMES))
+            .collect();
+        let mut out = Vec::new();
+        for name in names.into_iter().take(MAX_SUBSTRING_NAMES) {
+            out.extend(self.lookup(&name)?);
+        }
+        out.sort_by(|a, b| (&a.path, a.line, a.col).cmp(&(&b.path, b.line, b.col)));
+        Ok(out)
+    }
+
+    /// 本体と、あれば差分区画。
+    pub fn parts(&self) -> Vec<(&'static str, &Index)> {
+        let mut v = vec![("main", &self.main)];
+        v.extend(self.delta.as_ref().map(|d| ("delta", d)));
+        v
     }
 
     /// 走査で見えた全ファイル（定義を持たないものも含む）を経路の昇順で返す。
