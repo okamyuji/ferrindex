@@ -274,7 +274,7 @@ impl<'a> Cols<'a> {
 
     /// `start` は文字の境界。前より手前の位置は行頭から数え直す。
     fn at(&mut self, start: usize) -> u32 {
-        if start < self.at {
+        if self.src.get(self.at..start).is_none() {
             *self = Cols::new(self.src);
         }
         let gap = &self.src[self.at..start];
