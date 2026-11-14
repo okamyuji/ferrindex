@@ -12,3 +12,7 @@ end
 
 module Outer::Inner
 end
+
+class Admin::StatusPolicy
+  def show?; end
+end

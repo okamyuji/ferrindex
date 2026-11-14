@@ -393,7 +393,7 @@ fn ruby_scope_resolution_names_use_the_scope_as_container() {
         row(&r, "show"),
         "method",
         2,
-        Some("BaseController"),
+        Some("ActivityPub.BaseController"),
         "def show; end",
     );
     check(row(&r, "C"), "class", 10, Some("A.B"), "class A::B::C\nend");
@@ -403,6 +403,13 @@ fn ruby_scope_resolution_names_use_the_scope_as_container() {
         13,
         Some("Outer"),
         "module Outer::Inner\nend",
+    );
+    check(
+        row(&r, "show?"),
+        "method",
+        17,
+        Some("Admin.StatusPolicy"),
+        "def show?; end",
     );
 }
 

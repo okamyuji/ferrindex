@@ -66,7 +66,16 @@ fn tag_defs(lang: Lang, src: &[u8]) -> Option<Vec<Def>> {
         names.push(tag.name_range);
         outer.push(outer_type(lang, body, name_node, src));
     }
-    let containers = containers(&defs, &names);
+    // 自分の表示が `A.B` になる holder（Ruby の `class A::B`）の中の定義は、`B` ではなく `A.B` の中にあることにする
+    let labels: Vec<String> = defs
+        .iter()
+        .zip(&outer)
+        .map(|(d, o)| match o {
+            Some(scope) => format!("{scope}.{}", d.name),
+            None => d.name.clone(),
+        })
+        .collect();
+    let containers = containers(&defs, &names, &labels);
     for (d, (inner, out)) in defs.iter_mut().zip(containers.into_iter().zip(outer)) {
         d.container = out.or(inner);
     }
@@ -75,7 +84,8 @@ fn tag_defs(lang: Lang, src: &[u8]) -> Option<Vec<Def>> {
 
 /// 各定義の名前の範囲を含む最も内側の class / interface / module / type（自分自身は除く）。
 /// 定義を名前の位置順に走査し、holder の範囲を入れ子のスタックで持つので O(n log n)。
-fn containers(defs: &[Def], names: &[Range<usize>]) -> Vec<Option<String>> {
+/// container の表示名は `labels`（定義ごと）から取る。
+fn containers(defs: &[Def], names: &[Range<usize>], labels: &[String]) -> Vec<Option<String>> {
     let holder_kinds = ["class", "interface", "module", "type"].map(kind_id);
     let mut holders: Vec<usize> = (0..defs.len())
         .filter(|&i| holder_kinds.contains(&defs[i].kind))
@@ -100,7 +110,7 @@ fn containers(defs: &[Def], names: &[Range<usize>]) -> Vec<Option<String>> {
         {
             stack.pop();
         }
-        out[i] = stack.last().map(|&h| defs[h].name.clone());
+        out[i] = stack.last().map(|&h| labels[h].clone());
         stack.extend(own);
     }
     out
@@ -279,7 +289,8 @@ mod tests {
             })
             .collect();
         let names: Vec<_> = items.iter().map(|i| i.3.clone()).collect();
-        containers(&defs, &names)
+        let labels: Vec<String> = items.iter().map(|i| i.0.into()).collect();
+        containers(&defs, &names, &labels)
     }
 
     #[test]

@@ -327,3 +327,16 @@ fn find_only_reads_the_files_it_shows() {
     assert_eq!(run.lines(), ["a.rs:1:4 function many\tfn many() {}"]);
     assert_eq!(run.err, "… 2 more\n");
 }
+
+#[test]
+fn methods_of_a_scope_resolution_class_carry_the_full_qualifier() {
+    let r = Repo::new();
+    r.write("p.rb", "class Admin::StatusPolicy\n  def show?; end\nend\n");
+    for term in ["Admin::StatusPolicy.show?", "Admin.StatusPolicy.show?"] {
+        assert_eq!(
+            r.run(&["find", term]).heads(),
+            ["p.rb:2:7 method Admin.StatusPolicy.show?"],
+            "{term}"
+        );
+    }
+}
