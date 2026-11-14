@@ -100,6 +100,14 @@ git の外で実行した場合や、索引が壊れていて作り直せない�
           { "type": "command", "command": "ferrindex hook session-start" }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "ferrindex hook post-tool-use" }
+        ]
+      }
     ]
   }
 }
@@ -112,9 +120,14 @@ Claude Code は SessionStart の標準出力を Claude の文脈に加えるの�
 索引がまだ無いときは、`ferrindex update` を切り離して起動し、最初の検索が待つことがある旨を案内に足します。
 git リポジトリの外や入力の誤りでは何も出力しません。いずれの場合も終了コードは 0 です。
 
+`ferrindex hook post-tool-use` は、Bash で `ferrindex find` か `ferrindex show` を実行した直後にだけ働きます。
+その出力で問いに答えられるなら、Read や rg で確かめ直さずにそのまま答えるよう、Claude に短く添えます。
+確かめ直すとやり取りが 1 回増え、そのたびに Claude Code は会話の文脈を読み直すので、入力の token が増えます。
+ほかのコマンドと入力の誤りでは何も出力しません。終了コードは常に 0 です。
+
 ## 撤去
 
-1. `settings.json` から `ferrindex hook session-start` の項目を消します。
+1. `settings.json` から `ferrindex hook session-start` と `ferrindex hook post-tool-use` の項目を消します。
 2. `cargo uninstall ferrindex` を実行します。
 3. 索引のキャッシュディレクトリ `$XDG_CACHE_HOME/ferrindex`（未設定なら `~/.cache/ferrindex`）を削除します。
 

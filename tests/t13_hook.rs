@@ -16,8 +16,12 @@ struct Hook {
 }
 
 fn hook(xdg: &Path, stdin: &str) -> Hook {
+    hook_event(xdg, "session-start", stdin)
+}
+
+fn hook_event(xdg: &Path, event: &str, stdin: &str) -> Hook {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ferrindex"))
-        .args(["hook", "session-start"])
+        .args(["hook", event])
         .env("XDG_CACHE_HOME", xdg)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -164,4 +168,68 @@ fn other_hook_names_are_usage_errors() {
     let r = Repo::new();
     assert_eq!(r.run(&["hook"]).code, 2);
     assert_eq!(r.run(&["hook", "other"]).code, 2);
+}
+
+fn post(command: &str) -> Hook {
+    let input = serde_json::json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+    });
+    hook_event(
+        Path::new("/nonexistent"),
+        "post-tool-use",
+        &input.to_string(),
+    )
+}
+
+fn context_of(h: &Hook) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(&h.out).ok()?;
+    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .map(str::to_string)
+}
+
+#[test]
+fn post_tool_use_adds_answer_now_note_after_find_and_show() {
+    for cmd in [
+        "ferrindex find SyncPod",
+        "ferrindex show Kubelet.SyncPod",
+        "cd sub && ferrindex find a",
+        "ferrindex find foo | head -3",
+    ] {
+        let h = post(cmd);
+        assert_eq!(h.code, 0, "{cmd}");
+        let note = context_of(&h).unwrap_or_else(|| panic!("no context for {cmd}"));
+        assert!(note.contains("そのまま回答"), "{cmd}: {note}");
+    }
+}
+
+#[test]
+fn post_tool_use_is_silent_for_other_commands() {
+    for cmd in [
+        "rg -n foo",
+        "echo ferrindex find foo",
+        "ferrindex outline a.rs",
+        "ferrindex files main",
+        "cargo test",
+    ] {
+        let h = post(cmd);
+        assert_eq!(h.code, 0, "{cmd}");
+        assert!(
+            h.out.is_empty(),
+            "{cmd}: {}",
+            String::from_utf8_lossy(&h.out)
+        );
+    }
+}
+
+#[test]
+fn post_tool_use_is_silent_on_broken_input() {
+    for input in ["", "{", "[]", r#"{"tool_input":{"command":1}}"#] {
+        let h = hook_event(Path::new("/nonexistent"), "post-tool-use", input);
+        assert_eq!(h.code, 0, "{input}");
+        assert!(h.out.is_empty(), "{input}");
+    }
 }
