@@ -302,6 +302,8 @@ fn precise_uses_the_server_result() {
 #[test]
 fn precise_maps_each_command_to_its_method() {
     let r = repo();
+    // 定義が2つあれば、名前一致の呼び出しが答えに無くてもサーバーの答えを採る。
+    r.write("z.rs", "fn target() {}\n");
     r.write("impl.rs", "mod m {\n\n\n  fn imp() {}\n}\n");
     r.write(
         "caller.rs",
@@ -420,7 +422,7 @@ fn results_outside_root_are_dropped() {
     let outside = r.root.with_file_name("outside.rs");
     std::fs::write(&outside, "fn x() { target(); }\n").unwrap();
     let refs = format!(
-        r#"[["file://{}", 0, 9], ["c.rs", 1, 12]]"#,
+        r#"[["file://{}", 0, 9], ["c.rs", 1, 12], ["a.rs", 3, 4]]"#,
         outside.display()
     );
     let o = precise(
@@ -428,7 +430,13 @@ fn results_outside_root_are_dropped() {
         &[("FAKE_REFS", &refs)],
         &["refs", "target", "--precise"],
     );
-    assert_eq!(o.lines(), ["c.rs:2:13 ref in other\tlet g = target;"]);
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "c.rs:2:13 ref in other\tlet g = target;",
+        ]
+    );
 }
 
 #[test]
@@ -445,10 +453,16 @@ fn precise_keeps_results_in_files_without_a_language() {
     r.write("notes.txt", "see target here\n");
     let o = precise(
         &r,
-        &[("FAKE_REFS", r#"[["notes.txt", 0, 4]]"#)],
+        &[("FAKE_REFS", r#"[["notes.txt", 0, 4], ["a.rs", 3, 4]]"#)],
         &["refs", "target", "--precise"],
     );
-    assert_eq!(o.lines(), ["notes.txt:1:5 ref\tsee target here"]);
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "notes.txt:1:5 ref\tsee target here",
+        ]
+    );
 }
 
 #[test]
@@ -515,4 +529,28 @@ fn c_without_compile_commands_does_not_start_clangd() {
     let o = r.run_with(&env, &["refs", "target", "--precise"]);
     assert!(log.exists());
     assert_eq!(o.err, "");
+}
+
+#[test]
+fn precise_answer_missing_a_call_of_the_only_definition_falls_back() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    // 答えに a.rs:4:5 の呼び出しが無い（別名や取り込み経由の呼び出しを返さないサーバー）。
+    for cmd in ["refs", "callers"] {
+        let o = precise(
+            &r,
+            &[("FAKE_REFS", r#"[["c.rs", 1, 12]]"#)],
+            &[cmd, "target", "--precise"],
+        );
+        assert!(
+            o.lines().contains(&"a.rs:4:5 call in caller_fn\ttarget();"),
+            "{cmd}: {:?}",
+            o.lines()
+        );
+        assert_eq!(
+            o.err,
+            "ferrindex: 言語サーバーが取り込みや別名経由の呼び出しを返していません。名前一致の結果です（未確定）\n",
+            "{cmd}"
+        );
+    }
 }

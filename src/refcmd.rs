@@ -9,7 +9,7 @@ use std::{
     fs,
     io::Write,
     os::unix::ffi::OsStrExt,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -170,23 +170,56 @@ fn precise_lines(
     }
     found.sort();
     found.dedup();
+    let root = canonical_root(ctx);
+    if defs.len() == 1
+        && !found.is_empty()
+        && misses_a_call(view, &last_segment(term), &root, &found).map_err(|c| corrupt(c, ctx))?
+    {
+        return Ok(Err(
+            "言語サーバーが取り込みや別名経由の呼び出しを返していません".to_string(),
+        ));
+    }
     let plain = match kind {
         RefKind::Refs => REF_PLAIN,
         RefKind::Callers => REF_CALL,
         RefKind::Impls | RefKind::Supers => REF_INHERIT,
     };
-    Ok(Ok(located(ctx, &found, plain)))
+    Ok(Ok(located(ctx, &root, &found, plain)))
+}
+
+/// サーバーは正規化したパスで答える。
+fn canonical_root(ctx: &Ctx) -> PathBuf {
+    fs::canonicalize(&ctx.root).unwrap_or_else(|_| ctx.root.clone())
+}
+
+/// 定義が1つなら、名前一致の呼び出しはどれもその定義への呼び出しのはず。答えに無い呼び出しが
+/// あれば、サーバーは `require` の分割代入や別名を経た呼び出しを追えていない。
+fn misses_a_call(
+    view: &View,
+    name: &str,
+    root: &Path,
+    found: &[Location],
+) -> Result<bool, crate::codec::Corrupt> {
+    let answered: HashSet<(&[u8], u32, u32)> = found
+        .iter()
+        .filter_map(|l| {
+            let rel = l.path.strip_prefix(root).ok()?;
+            Some((rel.as_os_str().as_bytes(), l.line, l.col))
+        })
+        .collect();
+    Ok(view
+        .lookup_refs(name.as_bytes())?
+        .iter()
+        .any(|f| f.kind == REF_CALL && !answered.contains(&(&f.path[..], f.line, f.col))))
 }
 
 /// 位置ごとにファイルを抽出し直し、その位置の参照の種類と、囲む最も内側の定義を添える。
 /// 作業ツリーの外の位置（依存ライブラリなど）は出さない。
-fn located(ctx: &Ctx, found: &[Location], plain: u8) -> Vec<Vec<u8>> {
-    // サーバーは正規化したパスで答える。
-    let root = fs::canonicalize(&ctx.root).unwrap_or_else(|_| ctx.root.clone());
+fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8) -> Vec<Vec<u8>> {
     let mut parsed: HashMap<&Path, Option<Parsed>> = HashMap::new();
     let mut lines = Vec::new();
     for loc in found {
-        let Ok(rel) = loc.path.strip_prefix(&root) else {
+        let Ok(rel) = loc.path.strip_prefix(root) else {
             continue;
         };
         let Some((src, defs, refs)) = parsed.entry(rel).or_insert_with(|| parse(ctx, rel)) else {
