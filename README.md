@@ -18,7 +18,8 @@ cargo install --path .
 
 ## 使い方
 
-すべてのサブコマンドは git リポジトリの中で実行します。
+`outline` はファイルを直接読むので、git リポジトリの外でも使えます。
+それ以外のサブコマンドは git リポジトリの中で実行します。
 検索のたびに索引を最新にするので、事前の準備は要りません。
 
 - `ferrindex update [--rebuild] [--stats]` 索引を更新します。`--rebuild` は全件を作り直します。
@@ -43,6 +44,9 @@ fn main() {
 $ ferrindex map src
 src/cli/alias.rs  ~2806  CLI aliases (`awscli/alias.py`): the `[toplevel]` aliases of the main
 ```
+
+`map` の `~N` 列は、ファイルの token 数の見積もりです。
+コードは文字数を 3.5 で、それ以外は 4.0 で割ります。
 
 終了コードは次のとおりです。
 
