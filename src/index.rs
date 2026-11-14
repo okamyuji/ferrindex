@@ -11,6 +11,7 @@ use memmap2::Mmap;
 
 use crate::codec::{Corrupt, Row, decode_rows, encode_rows, key_by_rank};
 use crate::extract::Def;
+use crate::store::write_atomic;
 
 pub const LANG_DELETED: u8 = 254;
 pub const LANG_BINARY: u8 = 255;
@@ -210,24 +211,9 @@ pub fn write_index(path: &Path, files: &[FileEntry]) -> io::Result<()> {
     write_with(path, files, fingerprint())
 }
 
-/// 同じディレクトリの一時ファイルへ書いて rename する。読み手は旧版か新版のどちらかだけを見る。
 fn write_with(path: &Path, files: &[FileEntry], fp: u64) -> io::Result<()> {
     let bytes = assemble(fp, FORMAT_VERSION, &sections(files)?);
-    let name = path.file_name().ok_or_else(|| invalid("no file name"))?;
-    let mut tmp_name = std::ffi::OsString::from(".");
-    tmp_name.push(name);
-    tmp_name.push(format!(".{}.tmp", std::process::id()));
-    let tmp = path.with_file_name(tmp_name);
-    let result = (|| {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-        fs::rename(&tmp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    write_atomic(path, |f| f.write_all(&bytes))
 }
 
 struct Section {
