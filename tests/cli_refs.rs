@@ -871,3 +871,55 @@ fn supers_compare_only_the_bases_of_the_queried_type() {
     assert_eq!(o.err, "");
     assert_eq!(o.lines(), ["s.py:1:7 inherit\tclass A2:"]);
 }
+
+const AMBIGUOUS_NOTE: &str = "ferrindex: bar の定義が2件あります。名前一致なので、どの定義への呼び出しかを区別しません。絞るには --precise を使ってください\n";
+
+fn two_bar_defs() -> Repo {
+    let r = Repo::new();
+    r.write("lib.rs", common::SAMPLE);
+    r.write("use.rs", "fn user(x: Foo) {\n    x.bar();\n}\n");
+    r
+}
+
+#[test]
+fn name_match_notes_when_the_name_has_several_definitions() {
+    let r = two_bar_defs();
+    for cmd in ["callers", "refs"] {
+        let o = r.run(&[cmd, "bar"]);
+        assert_eq!(o.code, 0, "{cmd}");
+        assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"], "{cmd}");
+        assert_eq!(o.err, AMBIGUOUS_NOTE, "{cmd}");
+    }
+}
+
+#[test]
+fn name_match_notes_that_the_qualifier_is_not_used() {
+    let r = two_bar_defs();
+    for cmd in ["callers", "refs"] {
+        let o = r.run(&[cmd, "Foo.bar"]);
+        assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"], "{cmd}");
+        assert_eq!(
+            o.err,
+            "ferrindex: 名前一致では Foo.bar の修飾を使わず、bar の呼び出しをすべて出します。絞るには --precise を使ってください\n",
+            "{cmd}"
+        );
+    }
+}
+
+#[test]
+fn name_match_note_comes_before_the_more_line() {
+    let r = two_bar_defs();
+    r.write("use.rs", "fn user(x: Foo) {\n    x.bar();\n    x.bar();\n}\n");
+    let o = r.run(&["callers", "bar", "--limit", "1"]);
+    assert_eq!(o.err, format!("{AMBIGUOUS_NOTE}… 1 more\n"));
+}
+
+#[test]
+fn name_match_has_no_note_for_a_single_definition_or_no_hit() {
+    let r = repo();
+    assert_eq!(r.run(&["callers", "target"]).err, "");
+    assert_eq!(r.run(&["refs", "target"]).err, "");
+    let r = two_bar_defs();
+    let o = r.run(&["callers", "Foo.nothing"]);
+    assert_eq!((o.code, o.err.as_str()), (1, ""));
+}

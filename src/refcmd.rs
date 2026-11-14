@@ -62,7 +62,13 @@ pub(crate) fn run(
     err: &mut impl Write,
 ) -> Res {
     if !precise {
-        return name_match(ctx, view, kind, term, limit, out, err);
+        let mut found_err = Vec::new();
+        let found = name_match(ctx, view, kind, term, limit, out, &mut found_err)?;
+        if found && matches!(kind, RefKind::Callers | RefKind::Refs) {
+            ambiguity_note(ctx, view, term, err)?;
+        }
+        err.write_all(&found_err)?;
+        return Ok(found);
     }
     let why = match precise_lines(ctx, view, kind, term)? {
         Ok(mut lines) if !lines.is_empty() => {
@@ -118,6 +124,31 @@ fn name_match(
             }
         }
     }
+}
+
+/// 名前一致は呼び先の定義を区別しない。結果をそのまま答えに使われないよう、混ざりうるときに知らせる。
+fn ambiguity_note(ctx: &Ctx, view: &View, term: &str, err: &mut impl Write) -> Res<()> {
+    let name = last_segment(term);
+    if name != term {
+        writeln!(
+            err,
+            "ferrindex: 名前一致では {term} の修飾を使わず、{name} の呼び出しをすべて出します。絞るには --precise を使ってください"
+        )?;
+        return Ok(());
+    }
+    let section = kind_id("section");
+    let defs = resolve_exact(view, &name)
+        .map_err(|c| corrupt(c, ctx))?
+        .iter()
+        .filter(|d| d.kind != section)
+        .count();
+    if defs > 1 {
+        writeln!(
+            err,
+            "ferrindex: {name} の定義が{defs}件あります。名前一致なので、どの定義への呼び出しかを区別しません。絞るには --precise を使ってください"
+        )?;
+    }
+    Ok(())
 }
 
 const GO_NEEDS_PRECISE: &str =
