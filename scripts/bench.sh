@@ -69,7 +69,7 @@ for spec in "${REPOS[@]}"; do
   first="${names%% *}"
   json="$(mktemp)"
   hyperfine -N --warmup 3 --runs 30 --export-json "$json" "\"$BIN\" find $first" >/dev/null
-  median_ms="$(python3 -I -c 'import json,statistics,sys; m=json.load(open(sys.argv[1]))["results"][0]["measurements"]; print(round(statistics.median(x["time_wall_clock"]["value"] for x in m)*1000,1))' "$json")"
+  median_ms="$(python3 -I -c 'import json,statistics,sys; r=json.load(open(sys.argv[1]))["results"][0]; t=r["times"] if "times" in r else [x["time_wall_clock"]["value"] for x in r["measurements"]]; print(round(statistics.median(t)*1000,1))' "$json")"
   rm -f "$json"
 
   target_ms="$(find_target_ms "$name" "$files")"
