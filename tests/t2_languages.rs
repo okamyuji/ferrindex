@@ -304,6 +304,41 @@ fn csharp_defs_and_bodies() {
 }
 
 #[test]
+fn ruby_scope_resolution_names_use_the_scope_as_container() {
+    let r = rows("ruby/scope.rb");
+    let base: Vec<_> = r.iter().filter(|x| x.0 == "BaseController").collect();
+    check(
+        base[0],
+        "class",
+        1,
+        Some("ActivityPub"),
+        "class ActivityPub::BaseController\n  def show; end\nend",
+    );
+    check(
+        base[1],
+        "class",
+        6,
+        Some("Admin"),
+        "class BaseController\n  end",
+    );
+    check(
+        row(&r, "show"),
+        "method",
+        2,
+        Some("BaseController"),
+        "def show; end",
+    );
+    check(row(&r, "C"), "class", 10, Some("A.B"), "class A::B::C\nend");
+    check(
+        row(&r, "Inner"),
+        "module",
+        13,
+        Some("Outer"),
+        "module Outer::Inner\nend",
+    );
+}
+
+#[test]
 fn go_type_aliases_are_types() {
     let r = rows("go/alias.go");
     check(

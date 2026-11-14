@@ -332,14 +332,16 @@ fn corrupt(_: Corrupt, ctx: &Ctx) -> Fail {
 
 /// 完全一致、`Container.name`、名前の部分一致（ASCII の大小無視）の順に試す。
 /// Markdown の見出しは `.` を含み得るので、全体の完全一致を先に引く。
+/// 修飾の区切りは `::` も `.` と同じに扱う。
 fn resolve(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
     let hits = view.lookup(term.as_bytes())?;
     if !hits.is_empty() {
         return Ok(hits);
     }
-    let (container, name) = match term.rsplit_once('.') {
+    let dotted = term.replace("::", ".");
+    let (container, name) = match dotted.rsplit_once('.') {
         Some((c, n)) if !c.is_empty() && !n.is_empty() => (Some(c), n),
-        _ => (None, term),
+        _ => (None, dotted.as_str()),
     };
     let keep = |f: &Found| container.is_none_or(|c| f.container.as_deref() == Some(c.as_bytes()));
     let mut hits = view.lookup(name.as_bytes())?;

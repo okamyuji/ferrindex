@@ -253,3 +253,20 @@ fn control_characters_in_paths_are_escaped_in_every_command() {
     assert_eq!(map.lines().len(), 1, "{}", map.out);
     assert!(map.lines()[0].starts_with(name), "{}", map.out);
 }
+
+#[test]
+fn double_colon_and_dot_qualify_names_alike() {
+    let r = Repo::new();
+    r.write("app/base.rb", "class ActivityPub::BaseController\nend\n");
+    r.write("app/other.rb", "class Other::BaseController\nend\n");
+    for term in ["ActivityPub::BaseController", "ActivityPub.BaseController"] {
+        let run = r.run(&["find", term]);
+        assert_eq!(
+            run.lines(),
+            ["app/base.rb:1:20 class ActivityPub.BaseController"],
+            "{term}"
+        );
+    }
+    r.write("a.cpp", "struct S { void f(); };\nvoid S::f() {}\n");
+    assert_eq!(r.run(&["find", "S::f"]).code, 0);
+}

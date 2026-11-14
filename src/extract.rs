@@ -140,7 +140,15 @@ fn outer_type(lang: Lang, body: Node<'_>, name: Node<'_>, src: &[u8]) -> Option<
             table.child_by_field_name("field").unwrap_or(table)
         }
         // `def self.f` の object は self なので型名が見つからず、囲む class のままになる
-        Lang::Ruby => body.child_by_field_name("object")?,
+        Lang::Ruby => match name.parent().filter(|p| p.kind() == "scope_resolution") {
+            // `class A::B::C` の所属は `A.B`。`::` は検索語と同じ `.` にそろえる
+            Some(path) => {
+                let scope = path.child_by_field_name("scope")?;
+                let text = String::from_utf8_lossy(&src[scope.byte_range()]);
+                return Some(text.trim_start_matches("::").replace("::", "."));
+            }
+            None => body.child_by_field_name("object")?,
+        },
         // `Foo.prototype.f` の最初の識別子は Foo
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => name
             .parent()
