@@ -21,7 +21,7 @@ const fn case(lang: Lang, path: &'static str, call_line: u32, inherit: Option<(u
 const CASES: [Case; 14] = [
     case(Lang::Rust, "rust/main.rs", 6, None),
     case(Lang::Go, "go/main.go", 8, None),
-    case(Lang::Python, "python/main.py", 9, Some((4, REF_PLAIN))),
+    case(Lang::Python, "python/main.py", 9, Some((4, REF_INHERIT))),
     case(
         Lang::JavaScript,
         "javascript/main.js",
@@ -39,7 +39,7 @@ const CASES: [Case; 14] = [
     case(Lang::CSharp, "csharp/Main.cs", 7, Some((4, REF_INHERIT))),
     case(Lang::Ruby, "ruby/main.rb", 9, Some((4, REF_INHERIT))),
     case(Lang::C, "c/main.c", 6, None),
-    case(Lang::Cpp, "cpp/main.cpp", 8, Some((4, REF_PLAIN))),
+    case(Lang::Cpp, "cpp/main.cpp", 8, Some((4, REF_INHERIT))),
     case(Lang::Swift, "swift/main.swift", 8, Some((4, REF_INHERIT))),
     case(Lang::Lua, "lua/main.lua", 6, None),
     case(Lang::Dart, "dart/main.dart", 8, Some((4, REF_INHERIT))),
@@ -160,10 +160,10 @@ fn non_call_reference_is_plain() {
 
 #[test]
 fn classification_looks_at_most_three_ancestors_up() {
-    // x -> parenthesized -> parenthesized -> parenthesized -> call: 4 段上の call は見ない
-    let near = targets(Lang::JavaScript, b"f((target));\n");
+    // target の 4 段上の call は見ない
+    let near = targets(Lang::JavaScript, b"((target))();\n");
     assert_eq!(near[0].kind, REF_CALL);
-    let far = targets(Lang::JavaScript, b"f((((target))));\n");
+    let far = targets(Lang::JavaScript, b"(((target)))();\n");
     assert_eq!(far[0].kind, REF_PLAIN);
 }
 
@@ -192,4 +192,36 @@ fn deep_nesting_does_not_overflow() {
         .join()
         .unwrap();
     assert_eq!(found.len(), 1);
+}
+
+fn kinds(lang: Lang, src: &str) -> Vec<(String, u8)> {
+    refs_of(lang, src.as_bytes())
+        .into_iter()
+        .map(|r| (r.name, r.kind))
+        .collect()
+}
+
+#[test]
+fn call_arguments_are_plain_references() {
+    let cases = [
+        (Lang::Rust, "fn g() { f(x); o.method(x); }\n"),
+        (Lang::Python, "def g():\n    f(x)\n    o.method(x)\n"),
+        (Lang::Java, "class A { void g() { f(x); o.method(x); } }\n"),
+    ];
+    for (lang, src) in cases {
+        let k = kinds(lang, src);
+        let kind_of = |n: &str, nth: usize| k.iter().filter(|(m, _)| m == n).nth(nth).unwrap().1;
+        assert_eq!(kind_of("f", 0), REF_CALL, "{lang:?}");
+        assert_eq!(kind_of("x", 0), REF_PLAIN, "{lang:?}");
+        assert_eq!(kind_of("method", 0), REF_CALL, "{lang:?}");
+        assert_eq!(kind_of("x", 1), REF_PLAIN, "{lang:?}");
+    }
+}
+
+#[test]
+fn base_classes_are_inherit_references() {
+    let py = kinds(Lang::Python, "class B(A):\n    pass\n");
+    assert!(py.contains(&("A".into(), REF_INHERIT)));
+    let cpp = kinds(Lang::Cpp, "class B : public A {};\n");
+    assert!(cpp.contains(&("A".into(), REF_INHERIT)));
 }

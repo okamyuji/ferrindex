@@ -25,7 +25,7 @@ pub struct Ref {
 /// 分類のために見る祖先の段数。入れ子が深い入力でも一つの参照の分類を定数時間にする。
 const CLASSIFY_DEPTH: usize = 3;
 const CALL_WORDS: [&str; 3] = ["call", "invocation", "send"];
-const INHERIT_WORDS: [&str; 8] = [
+const INHERIT_WORDS: [&str; 9] = [
     "superclass",
     "extends",
     "implements",
@@ -34,6 +34,7 @@ const INHERIT_WORDS: [&str; 8] = [
     "inheritance",
     "super_interfaces",
     "delegation_specifier",
+    "base_class",
 ];
 
 /// UTF-8 でない入力と Markdown は空を返す。
@@ -58,7 +59,7 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
     let mut refs = Vec::new();
     let mut cursor = tree.walk();
     // 木の再帰では深い入れ子でスタックが溢れるので、祖先の種類は自前のスタックに持つ
-    let mut ancestors: Vec<&str> = Vec::new();
+    let mut ancestors: Vec<(&str, Option<&str>)> = Vec::new();
     loop {
         let node = cursor.node();
         if node.child_count() == 0 && node.is_named() && is_reference_kind(node.kind()) {
@@ -82,8 +83,9 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
                 });
             }
         }
+        let field = cursor.field_name();
         if cursor.goto_first_child() {
-            ancestors.push(node.kind());
+            ancestors.push((node.kind(), field));
             continue;
         }
         loop {
@@ -102,8 +104,16 @@ fn is_reference_kind(kind: &str) -> bool {
     kind.ends_with("identifier") || kind == "constant"
 }
 
-fn classify(ancestors: &[&str]) -> u8 {
-    for kind in ancestors.iter().rev().take(CLASSIFY_DEPTH) {
+/// 祖先は (種類, 親の中のフィールド名)。引数の中の識別子は呼び出しではないので、`argument` を通ったら打ち切る。
+/// Python の基底クラスは `class_definition` の `superclasses` フィールドの argument_list に入る。
+fn classify(ancestors: &[(&str, Option<&str>)]) -> u8 {
+    for (kind, field) in ancestors.iter().rev().take(CLASSIFY_DEPTH) {
+        if *field == Some("superclasses") {
+            return REF_INHERIT;
+        }
+        if kind.contains("argument") {
+            return REF_PLAIN;
+        }
         if CALL_WORDS.iter().any(|w| kind.contains(w)) {
             return REF_CALL;
         }
