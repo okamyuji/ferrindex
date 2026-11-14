@@ -1,0 +1,125 @@
+use std::cmp::Reverse;
+use std::collections::HashSet;
+
+use tree_sitter::Parser;
+
+use crate::extract::Def;
+use crate::lang::{Lang, tags_config};
+
+pub const REF_PLAIN: u8 = 0;
+pub const REF_CALL: u8 = 1;
+pub const REF_INHERIT: u8 = 2;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ref {
+    pub name: String,
+    /// 1 始まり
+    pub line: u32,
+    /// 1 始まり、UTF-16 単位
+    pub col: u32,
+    pub kind: u8,
+    /// 参照を囲む最も内側の定義の名前
+    pub container: Option<String>,
+}
+
+/// 分類のために見る祖先の段数。入れ子が深い入力でも一つの参照の分類を定数時間にする。
+const CLASSIFY_DEPTH: usize = 3;
+const CALL_WORDS: [&str; 3] = ["call", "invocation", "send"];
+const INHERIT_WORDS: [&str; 8] = [
+    "superclass",
+    "extends",
+    "implements",
+    "base_list",
+    "heritage",
+    "inheritance",
+    "super_interfaces",
+    "delegation_specifier",
+];
+
+/// UTF-8 でない入力と Markdown は空を返す。
+pub fn extract_refs(lang: Lang, src: &[u8], defs: &[Def]) -> Vec<Ref> {
+    if std::str::from_utf8(src).is_err() {
+        return Vec::new();
+    }
+    scan(lang, src, defs).unwrap_or_default()
+}
+
+fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
+    let mut parser = Parser::new();
+    parser.set_language(&tags_config(lang)?.language).ok()?;
+    let tree = parser.parse(src, None)?;
+
+    let def_names: HashSet<(u32, u32)> = defs.iter().map(|d| (d.line, d.col)).collect();
+    let mut order: Vec<usize> = (0..defs.len()).collect();
+    order.sort_by_key(|&i| (defs[i].body.start, Reverse(defs[i].body.end)));
+    let mut next = 0;
+    let mut open: Vec<usize> = Vec::new();
+
+    let mut refs = Vec::new();
+    let mut cursor = tree.walk();
+    // 木の再帰では深い入れ子でスタックが溢れるので、祖先の種類は自前のスタックに持つ
+    let mut ancestors: Vec<&str> = Vec::new();
+    loop {
+        let node = cursor.node();
+        if node.child_count() == 0 && node.is_named() && is_reference_kind(node.kind()) {
+            let start = node.start_byte();
+            let pos = node.start_position();
+            let (line, col) = (pos.row as u32 + 1, utf16_col(src, start));
+            if !def_names.contains(&(line, col)) {
+                while next < order.len() && defs[order[next]].body.start <= start {
+                    open.push(order[next]);
+                    next += 1;
+                }
+                while open.last().is_some_and(|&i| defs[i].body.end <= start) {
+                    open.pop();
+                }
+                refs.push(Ref {
+                    name: String::from_utf8_lossy(&src[start..node.end_byte()]).into_owned(),
+                    line,
+                    col,
+                    kind: classify(&ancestors),
+                    container: open.last().map(|&i| defs[i].name.clone()),
+                });
+            }
+        }
+        if cursor.goto_first_child() {
+            ancestors.push(node.kind());
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return Some(refs);
+            }
+            ancestors.pop();
+        }
+    }
+}
+
+fn is_reference_kind(kind: &str) -> bool {
+    kind.ends_with("identifier") || kind == "constant"
+}
+
+fn classify(ancestors: &[&str]) -> u8 {
+    for kind in ancestors.iter().rev().take(CLASSIFY_DEPTH) {
+        if CALL_WORDS.iter().any(|w| kind.contains(w)) {
+            return REF_CALL;
+        }
+        if INHERIT_WORDS.iter().any(|w| kind.contains(w)) {
+            return REF_INHERIT;
+        }
+    }
+    REF_PLAIN
+}
+
+/// 1 始まりの UTF-16 列。`start` は文字の境界で、src 全体は UTF-8 として検査済み。
+fn utf16_col(src: &[u8], start: usize) -> u32 {
+    let line_start = src[..start]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1);
+    let prefix = std::str::from_utf8(&src[line_start..start]).unwrap_or_default();
+    prefix.encode_utf16().count() as u32 + 1
+}
