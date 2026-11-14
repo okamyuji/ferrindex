@@ -288,7 +288,12 @@ fn entry_for(root: &Path, s: &Scanned, start: u64) -> io::Result<Option<FileEntr
             let bytes = match fs::read(root.join(rel)) {
                 Ok(b) => b,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(e) => return Err(e),
+                // 種類は `Fail::fresh` が終了コードを選ぶのに使うので保つ。
+                Err(e) => {
+                    let path = crate::query::escape_control(&s.path);
+                    let msg = format!("{}: {e}", String::from_utf8_lossy(&path));
+                    return Err(io::Error::new(e.kind(), msg));
+                }
             };
             if is_binary(&bytes) {
                 (LANG_BINARY, Vec::new(), Vec::new())

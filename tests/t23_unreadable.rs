@@ -69,3 +69,13 @@ fn precise_fails_when_an_answered_file_is_unreadable() {
     assert_eq!(o.code, 4, "{}", o.err);
     assert!(o.err.starts_with("ferrindex: c.rs: "), "{}", o.err);
 }
+
+#[test]
+fn update_names_a_file_it_cannot_read() {
+    let r = Repo::new();
+    r.write("a\x1bb.rs", A_RS);
+    fs::set_permissions(r.root.join("a\x1bb.rs"), fs::Permissions::from_mode(0o000)).unwrap();
+    let o = r.run(&["update"]);
+    assert_eq!(o.code, 4, "{}", o.err);
+    assert!(o.err.starts_with("ferrindex: a\\x1bb.rs: "), "{}", o.err);
+}
