@@ -155,8 +155,13 @@ mod tests {
 
     #[test]
     fn kind_ids_are_fixed() {
-        assert_eq!(kind_id("function"), 3);
-        assert_eq!(kind_id("section"), 11);
+        let names = [
+            "other", "class", "constant", "function", "interface", "macro", "method", "module", "property", "type",
+            "variable", "section",
+        ];
+        for (id, name) in names.iter().enumerate() {
+            assert_eq!(kind_id(name) as usize, id, "{name}");
+        }
         assert_eq!(kind_id("nope"), 0);
     }
 }
