@@ -100,7 +100,7 @@ fn trusted_list_holds_no_plain_paths() {
     assert_eq!(text.lines().count(), 1, "{text}");
     assert!(
         text.lines()
-            .all(|l| l.len() == 16 && l.bytes().all(|b| b.is_ascii_hexdigit())),
+            .all(|l| l.len() == 64 && l.bytes().all(|b| b.is_ascii_hexdigit())),
         "{text}"
     );
 }

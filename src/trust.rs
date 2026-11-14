@@ -12,7 +12,9 @@ use std::{
     time::Duration,
 };
 
-use crate::store::{fnv1a64, with_lock, write_atomic};
+use sha2::{Digest, Sha256};
+
+use crate::store::{with_lock, write_atomic};
 
 const LIST: &str = "trusted";
 const LOCK_TIMEOUT: Duration = Duration::from_secs(20);
@@ -30,8 +32,12 @@ fn data_dir() -> PathBuf {
     data_dir_in(env::var_os("XDG_DATA_HOME"), env::home_dir())
 }
 
+/// 衝突を作れるハッシュだと、信頼した根と同じ値になるディレクトリ名へ信頼が移るので SHA-256 にする。
 fn key(root: &Path) -> String {
-    format!("{:016x}", fnv1a64(root.as_os_str().as_bytes()))
+    Sha256::digest(root.as_os_str().as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn keys(dir: &Path) -> io::Result<Vec<String>> {
@@ -88,6 +94,14 @@ mod tests {
         assert_eq!(
             data_dir_in(None, home),
             Path::new("/h/.local/share/ferrindex")
+        );
+    }
+
+    #[test]
+    fn key_is_the_sha256_of_the_root_in_hex() {
+        assert_eq!(
+            key(Path::new("/r")),
+            "6588117f7b5162325520a43670f6b2f80d50e9aa09f820f57274904a22ddfaf2"
         );
     }
 

@@ -25,7 +25,7 @@ pub fn find_root(cwd: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
+fn fnv1a64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(FNV_OFFSET, |h, &b| {
         (h ^ u64::from(b)).wrapping_mul(FNV_PRIME)
     })
