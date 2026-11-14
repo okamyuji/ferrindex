@@ -283,3 +283,29 @@ fn markdown_is_unsupported() {
     );
     assert!(matches!(got, Err(LspError::Unsupported(_))));
 }
+
+#[test]
+fn shutdown_grace_ends_at_the_deadline() {
+    let (_d, root) = repo();
+    let spec = ServerSpec {
+        name: "s",
+        program: PathBuf::from("sh"),
+        args: vec!["-c".into(), "echo bad; exec sleep 30".into()],
+        env: vec![],
+    };
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(1);
+    let got = query_with(
+        &spec,
+        &root,
+        Lang::Rust,
+        Path::new("x.rs"),
+        1,
+        1,
+        Method::References,
+        deadline,
+    );
+    assert_eq!(got, Err(LspError::StartFailed("bad".into())));
+    let took = start.elapsed();
+    assert!(took < Duration::from_millis(1300), "{took:?}");
+}

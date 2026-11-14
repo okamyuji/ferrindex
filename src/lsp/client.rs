@@ -18,8 +18,8 @@ use super::{Location, LspError, Method, ServerSpec};
 use crate::lang::Lang;
 
 const POLL: Duration = Duration::from_millis(50);
-/// `exit` の後に自分で終わるのを待つ回数。POLL と掛けて2秒。
-const GRACE_POLLS: u32 = 40;
+/// `exit` の後に自分で終わるのを待つ長さ。期限までの残りがこれより短ければ残りまで。
+const GRACE: Duration = Duration::from_secs(2);
 
 /// `query` と同じだが、起動するサーバーを指定する。
 #[allow(clippy::too_many_arguments)]
@@ -49,7 +49,7 @@ pub fn query_with(
         });
         server.settled(method, &at, deadline)
     });
-    server.stop(result == Err(LspError::Timeout));
+    server.stop(deadline);
     // csharp-ls などは同じ結果を呼ぶたびに違う順で返し、重複も含みうる。
     result.map(|mut found| {
         found.sort();
@@ -291,19 +291,18 @@ impl Server {
         Ok(out)
     }
 
-    /// 期限切れなら猶予を置かずに止める。答えないサーバーを待つと期限を越えるため。
-    fn stop(mut self, timed_out: bool) {
+    /// 猶予は期限で打ち切る。期限切れなら猶予を置かずに止める。
+    fn stop(mut self, deadline: Instant) {
         self.next_id += 1;
         let _ = self.send(&json!({"jsonrpc": "2.0", "id": self.next_id, "method": "shutdown"}));
         let _ = self.notify("exit", Value::Null);
         drop(self.child.stdin.take());
-        if !timed_out {
-            for _ in 0..GRACE_POLLS {
-                if !matches!(self.child.try_wait(), Ok(None)) {
-                    break;
-                }
-                thread::sleep(POLL);
-            }
+        let until = deadline.min(Instant::now() + GRACE);
+        // `now < until` と同じ。比較演算子では `<=` との差が観測できない（等価な変異が残る）。
+        while Instant::now().checked_duration_since(until).is_none()
+            && matches!(self.child.try_wait(), Ok(None))
+        {
+            thread::sleep(POLL);
         }
     }
 }
