@@ -4,7 +4,7 @@ use std::{fs, path::PathBuf};
 
 use common::{Repo, SAMPLE};
 
-const HEADER_LEN: usize = 80;
+const HEADER_LEN: usize = 84;
 const SECTIONS: usize = 5;
 const SECTION_TABLE_AT: usize = 20;
 const SECTION_ENTRY_LEN: usize = 12;
@@ -69,7 +69,7 @@ fn le(b: &[u8]) -> u64 {
 /// 各区画の (開始, 長さ)。区画の長さはヘッダーの表から読む。
 fn section_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
     let mut start = HEADER_LEN;
-    (0..SECTIONS)
+    let spans = (0..SECTIONS)
         .map(|i| {
             let at = SECTION_TABLE_AT + i * SECTION_ENTRY_LEN;
             let len = usize::try_from(le(&bytes[at..at + 8])).unwrap();
@@ -77,7 +77,9 @@ fn section_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
             start += len;
             span
         })
-        .collect()
+        .collect();
+    assert_eq!(start, bytes.len(), "HEADER_LEN must match the real header");
+    spans
 }
 
 fn check(name: &str, target: fn(&(PathBuf, PathBuf)) -> &PathBuf, damage: impl Fn(&mut Vec<u8>)) {
