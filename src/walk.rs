@@ -1,4 +1,11 @@
-use std::{fs::Metadata, io, os::unix::ffi::OsStrExt, path::Path, sync::mpsc, time::UNIX_EPOCH};
+use std::{
+    fs::{File, Metadata},
+    io,
+    os::unix::ffi::OsStrExt,
+    path::Path,
+    sync::mpsc,
+    time::UNIX_EPOCH,
+};
 
 use ignore::{WalkBuilder, WalkState};
 
@@ -38,11 +45,8 @@ pub fn scan(root: &Path) -> io::Result<Vec<Scanned>> {
             let tx = tx.clone();
             Box::new(move |entry| {
                 let item = match entry {
-                    Ok(e) => scanned(root, &e).map(Ok),
-                    Err(e) => e
-                        .io_error()
-                        .filter(|io| io.kind() != io::ErrorKind::NotFound)
-                        .map(|io| Err(io::Error::new(io.kind(), e.to_string()))),
+                    Ok(e) => scanned(root, &e).transpose(),
+                    Err(e) => io_failure(&e).map(Err),
                 };
                 if let Some(item) = item {
                     let _ = tx.send(item);
@@ -56,25 +60,42 @@ pub fn scan(root: &Path) -> io::Result<Vec<Scanned>> {
     Ok(files)
 }
 
-fn scanned(root: &Path, entry: &ignore::DirEntry) -> Option<Scanned> {
-    if !entry.file_type()?.is_file() {
-        return None;
+fn io_failure(e: &ignore::Error) -> Option<io::Error> {
+    e.io_error()
+        .filter(|io| io.kind() != io::ErrorKind::NotFound)
+        .map(|io| io::Error::new(io.kind(), e.to_string()))
+}
+
+fn scanned(root: &Path, entry: &ignore::DirEntry) -> io::Result<Option<Scanned>> {
+    if !entry.file_type().is_some_and(|t| t.is_file()) {
+        return Ok(None);
     }
-    let meta = entry.metadata().ok()?;
+    let meta = match entry.metadata() {
+        Ok(m) => m,
+        Err(e) => return io_failure(&e).map_or(Ok(None), Err),
+    };
+    // ignore は .gitignore の I/O エラーを捨てる（ignore-0.4.34 lib.rs の push_ignore_io）。
+    // 読めないまま進むと除外規則が抜けたファイルを索引に入れてしまう
+    if entry.file_name() == ".gitignore"
+        && let Err(e) = File::open(entry.path())
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        return Err(io::Error::new(
+            e.kind(),
+            format!("{}: {e}", entry.path().display()),
+        ));
+    }
     if meta.len() > MAX_FILE_BYTES {
-        return None;
+        return Ok(None);
     }
-    Some(Scanned {
-        path: entry
-            .path()
-            .strip_prefix(root)
-            .ok()?
-            .as_os_str()
-            .as_bytes()
-            .to_vec(),
+    let Ok(rel) = entry.path().strip_prefix(root) else {
+        return Ok(None);
+    };
+    Ok(Some(Scanned {
+        path: rel.as_os_str().as_bytes().to_vec(),
         mtime_ns: mtime_ns(&meta),
         size: meta.len(),
-    })
+    }))
 }
 
 fn mtime_ns(meta: &Metadata) -> u64 {
@@ -210,6 +231,32 @@ mod tests {
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
         let got = scan(t.path());
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn unsearchable_directory_is_an_error() {
+        use std::{io, os::unix::fs::PermissionsExt};
+        let t = repo();
+        put(t.path(), "d/x.rs", b"");
+        let d = t.path().join("d");
+        // 一覧は読めるが中の stat ができない（実行ビットなし）
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o444)).unwrap();
+        let got = scan(t.path());
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(got.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn unreadable_gitignore_is_an_error() {
+        use std::{io, os::unix::fs::PermissionsExt};
+        let t = repo();
+        put(t.path(), "g/x.rs", b"");
+        put(t.path(), "g/.gitignore", b"x.rs\n");
+        let gi = t.path().join("g/.gitignore");
+        fs::set_permissions(&gi, fs::Permissions::from_mode(0o000)).unwrap();
+        let got = scan(t.path());
+        fs::set_permissions(&gi, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(got.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
     }
 
