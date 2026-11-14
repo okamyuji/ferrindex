@@ -27,7 +27,7 @@ fn cwd_of(input: &str) -> Option<PathBuf> {
 
 const GUIDANCE: &str = "このリポジトリでは ferrindex の索引を使えます。定義の場所は `ferrindex find <名前>`（`Class.method` も可）で引いてください。各行に定義の行が付くので、確認のための grep や Read は要りません。
 本体が要るときは find と Read ではなく `ferrindex show <名前>` を直接使ってください。ファイルの定義一覧は `ferrindex outline <file>`、ファイル名は `ferrindex files <部分文字列>` で引けます。
-呼び出し元は `ferrindex callers <名前>`、使用箇所は `ferrindex refs <名前>` で探してください。各行に、その位置を囲む定義が付きます。callers と refs の出力はそのまま回答に使えるので、rg、Grep、Read で確かめ直さないでください。終了コード 3 のときは `rg -n` を使ってください。
+呼び出し元は `ferrindex callers <名前>`、使用箇所は `ferrindex refs <名前>` で探してください。各行に、その位置を囲む定義が付きます。callers と refs の出力はそのまま回答に使えるので、rg、Grep、Read で確かめ直さないでください。ただし両者は名前の一致で探すので、`Class.method` と書いても修飾では絞れません。同名の定義が複数あるという注意の行が出たときや、正確な範囲が要るときは `--precise` を付けてください。終了コード 3 のときは `rg -n` を使ってください。
 ";
 
 const BUILDING: &str = "索引を背景で作成中です。最初の検索は待つことがあります。\n";

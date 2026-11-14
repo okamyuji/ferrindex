@@ -93,10 +93,12 @@ fn assert_guidance(text: &str) {
         "その位置を囲む定義が付きます",
         "rg、Grep、Read で確かめ直さないでください",
         "終了コード 3 のときは `rg -n` を使ってください",
+        "`Class.method` と書いても修飾では絞れません",
+        "正確な範囲が要るときは `--precise` を付けてください",
     ] {
         assert!(text.contains(needle), "missing {needle}: {text}");
     }
-    for absent in ["--precise", "trust"] {
+    for absent in ["trust"] {
         assert!(!text.contains(absent), "has {absent}: {text}");
     }
 }

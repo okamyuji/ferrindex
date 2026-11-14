@@ -6,6 +6,7 @@ description: ferrindex の --precise が使う言語サーバーを、利用者�
 # ferrindex の言語サーバーを入れる
 
 `ferrindex refs/callers/impls/supers --precise` は、言語ごとの言語サーバーを起動して答えを確かめます。
+`--precise` を付けない`refs`と`callers`は名前の一致で探すので、`Class.method`と書いても修飾では絞れません。同名の別の定義への呼び出しを分けるには、言語サーバーと`--precise`が要ります。
 このskillはリポジトリにある言語のうち、サーバーが無いか前提が足りないものを利用者に示します。入れるのは選ばれたものだけです。
 
 ## 守ること
