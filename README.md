@@ -69,6 +69,12 @@ src/cli/alias.rs  ~2806  CLI aliases (`awscli/alias.py`): the `[toplevel]` alias
 `--precise`を付けると、ferrindexは定義の言語の言語サーバーをその場で起動して問い合わせ、答えを得たらサーバーを止めます。
 サーバーは常駐しません。
 
+`--precise`が起動する言語サーバーは、リポジトリの中のコードを実行することがあります。
+rust-analyzerはCargoのbuild scriptとproc macroを動かします。
+typescript-language-serverは、リポジトリに入っているtsserverを使います。
+jdtlsはMavenを、csharp-lsはMSBuildを、sourcekit-lspは`Package.swift`を実行します。
+`--precise`は信頼できるリポジトリでだけ使ってください。
+
 多くのサーバーはプロジェクトを読み込み終える前にも、そうと知らせずに少ない答えを返します。
 そのためferrindexは最初の答えを得た後も、同じ問い合わせを約1秒おきに送り直します。
 続けて2回、同じ位置の集合が返ったときに、その答えを結果として採ります。
