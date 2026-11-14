@@ -698,3 +698,16 @@ fn supers_answer_must_cover_every_base() {
     assert_eq!(o.lines(), ["b.py:4:9 inherit in B\tclass B(A):"]);
     assert!(o.err.contains("継承の一部を返していません"), "{}", o.err);
 }
+
+#[test]
+fn supers_compare_only_the_bases_of_the_queried_type() {
+    let r = Repo::new();
+    r.write(
+        "s.py",
+        "class A2:\n    pass\n\nclass D2:\n    pass\n\nclass B2(A2):\n    pass\n\nclass C2(D2):\n    pass\n",
+    );
+    // C2 の基底 D2 は B2 の基底ではないので、答えに無くても名前一致に戻らない。
+    let o = precise_py(&r, r#"[["s.py", 0, 6]]"#, &["supers", "B2", "--precise"]);
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["s.py:1:7 inherit\tclass A2:"]);
+}
