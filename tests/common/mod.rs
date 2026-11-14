@@ -80,8 +80,17 @@ impl Repo {
 
     /// `trust` は端末からだけ受け付けるので、`script` で疑似端末を与えて実行する。
     pub fn trust(&self) {
+        let bin = env!("CARGO_BIN_EXE_ferrindex");
+        // macOS（BSD）と Linux（util-linux）で script の引数の形が違う。
+        let args: Vec<String> = if cfg!(target_os = "linux") {
+            ["-q", "-e", "-c", &format!("'{bin}' trust"), "/dev/null"]
+                .map(String::from)
+                .to_vec()
+        } else {
+            ["-q", "/dev/null", bin, "trust"].map(String::from).to_vec()
+        };
         let st = Command::new("script")
-            .args(["-q", "/dev/null", env!("CARGO_BIN_EXE_ferrindex"), "trust"])
+            .args(&args)
             .current_dir(&self.root)
             .env("XDG_CACHE_HOME", &self.xdg)
             .env("XDG_DATA_HOME", data_home(&self.xdg))
