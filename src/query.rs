@@ -368,6 +368,10 @@ fn resolve(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
         hits = view.lookup_substring(name.as_bytes())?;
         hits.retain(keep);
     }
+    if hits.is_empty() && container.is_some() {
+        // `Rust 1.100` のように `.` が名前の一部のとき
+        hits = view.lookup_substring(term.as_bytes())?;
+    }
     Ok(hits)
 }
 

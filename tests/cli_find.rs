@@ -340,3 +340,13 @@ fn methods_of_a_scope_resolution_class_carry_the_full_qualifier() {
         );
     }
 }
+
+#[test]
+fn partial_dotted_heading_is_found_by_substring() {
+    let r = Repo::new();
+    r.write("notes.md", "# Rust 1.100 notes\n\ntext\n");
+    assert_eq!(
+        r.run(&["find", "Rust 1.100"]).heads(),
+        ["notes.md:1:3 section Rust 1.100 notes"]
+    );
+}
