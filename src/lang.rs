@@ -65,11 +65,13 @@ pub fn lang_of(path: &Path) -> Option<Lang> {
 }
 
 /// 同梱の tags.scm が捕捉しない定義。struct と enum は Rust の tags.scm に合わせて class にする。
+/// ローカル関数の container は囲む型になる（メソッドは container にならない）。
 /// 索引の指紋に入れるので、変えると既存の索引は作り直される。
 const CSHARP_EXTRA: &str = "\
 (enum_declaration name: (identifier) @name) @definition.class
 (struct_declaration name: (identifier) @name) @definition.class
-(record_declaration name: (identifier) @name) @definition.class";
+(record_declaration name: (identifier) @name) @definition.class
+(local_function_statement name: (identifier) @name) @definition.function";
 
 /// `type A = B` は tags.scm の type_spec に当たらない。同じ名前の位置を取る `@reference.type` より
 /// 先に当たるよう、tags.scm の前に置く。

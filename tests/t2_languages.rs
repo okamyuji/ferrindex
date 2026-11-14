@@ -304,6 +304,25 @@ fn csharp_defs_and_bodies() {
 }
 
 #[test]
+fn csharp_local_functions_belong_to_the_enclosing_type() {
+    let r = rows("csharp/Local.cs");
+    check(
+        row(&r, "Inner"),
+        "function",
+        5,
+        Some("Host"),
+        "static void Inner()\n        {\n        }",
+    );
+    check(
+        row(&r, "Later"),
+        "function",
+        9,
+        Some("Host"),
+        "async Task Later()\n        {\n        }",
+    );
+}
+
+#[test]
 fn ruby_scope_resolution_names_use_the_scope_as_container() {
     let r = rows("ruby/scope.rb");
     let base: Vec<_> = r.iter().filter(|x| x.0 == "BaseController").collect();
