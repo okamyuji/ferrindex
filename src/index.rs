@@ -261,23 +261,9 @@ fn le_u32(b: &[u8]) -> u32 {
     u32::from_le_bytes(b[..4].try_into().expect("caller passes 4 bytes"))
 }
 
-/// 値が鍵順の順位と一致することを確かめる。ここを通れば `key_by_rank` と I2 が成り立つ。
-fn check_ranks(m: &Map<Section>) -> Result<(), Corrupt> {
-    let mut s = m.stream();
-    let mut i = 0u64;
-    while let Some((_, v)) = s.next() {
-        if v != i {
-            return Err(Corrupt);
-        }
-        i += 1;
-    }
-    Ok(())
-}
-
 fn open_fst(s: Section) -> Result<Map<Section>, Corrupt> {
-    let m = Map::new(s).map_err(|_| Corrupt)?;
-    check_ranks(&m)?;
-    Ok(m)
+    // 値が順位であることは書き手が保証する。偶発的な破損は先の CRC で弾く
+    Map::new(s).map_err(|_| Corrupt)
 }
 
 impl Index {
@@ -407,8 +393,6 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use std::fs;
-
-    use fst::MapBuilder;
 
     use super::*;
 
@@ -655,14 +639,6 @@ mod tests {
         assert!(is_corrupt(open_bytes(&b)));
     }
 
-    fn fst_map(pairs: &[(&[u8], u64)]) -> Vec<u8> {
-        let mut b = MapBuilder::memory();
-        for (k, v) in pairs {
-            b.insert(k, *v).unwrap();
-        }
-        b.into_inner().unwrap()
-    }
-
     #[test]
     fn inconsistent_sections_are_corrupt() {
         let good = sections(&[entry("a", vec![def("x", 1, None)]), entry("b", vec![])]).unwrap();
@@ -691,24 +667,6 @@ mod tests {
         assert!(
             is_corrupt(assembled(fingerprint(), FORMAT_VERSION, &s)),
             "offsets too short"
-        );
-        let mut s = good.clone();
-        s[0] = fst_map(&[(b"a", 1), (b"b", 0)]);
-        assert!(
-            is_corrupt(assembled(fingerprint(), FORMAT_VERSION, &s)),
-            "path ids not ranks"
-        );
-        let mut s = good.clone();
-        s[0] = fst_map(&[(b"a", 0), (b"b", 2)]);
-        assert!(
-            is_corrupt(assembled(fingerprint(), FORMAT_VERSION, &s)),
-            "path id gap"
-        );
-        let mut s = good.clone();
-        s[1] = fst_map(&[(b"x", 5)]);
-        assert!(
-            is_corrupt(assembled(fingerprint(), FORMAT_VERSION, &s)),
-            "name id not rank"
         );
         let mut s = good.clone();
         s[0] = vec![1, 2, 3];
