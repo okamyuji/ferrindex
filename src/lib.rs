@@ -8,6 +8,7 @@ pub mod intern;
 pub mod lang;
 mod markdown;
 pub mod query;
+mod refcmd;
 pub mod refs;
 pub mod store;
 pub mod walk;

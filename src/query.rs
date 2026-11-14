@@ -14,6 +14,7 @@ use crate::extract::extract;
 use crate::fresh::{self, Found, View, is_binary};
 use crate::index::contains_ignore_ascii_case;
 use crate::lang::{kind_name, lang_of};
+use crate::refcmd::{self, RefKind};
 use crate::store::find_root;
 use crate::walk::MAX_FILE_BYTES;
 
@@ -28,9 +29,9 @@ const SHOW_LIMIT: usize = 3;
 const MAP_LIMIT: usize = 200;
 const SHOW_MAX_LINES: usize = 200;
 
-const USAGE: &str = "usage: ferrindex update [--rebuild] [--stats] | find <name> [--limit N] | files <substr> [--limit N] | outline <file> | show <name> [--limit N] | map [<dir>] [--limit N]";
+const USAGE: &str = "usage: ferrindex update [--rebuild] [--stats] | find <name> [--limit N] | files <substr> [--limit N] | outline <file> | show <name> [--limit N] | map [<dir>] [--limit N] | refs <name> [--limit N] | callers <name> [--limit N] | impls <name> [--limit N] | supers <name> [--limit N]";
 
-struct Fail {
+pub(crate) struct Fail {
     code: u8,
     msg: String,
 }
@@ -79,7 +80,7 @@ impl From<io::Error> for Fail {
     }
 }
 
-type Res<T = bool> = Result<T, Fail>;
+pub(crate) type Res<T = bool> = Result<T, Fail>;
 
 enum Cmd {
     Update { rebuild: bool, stats: bool },
@@ -88,6 +89,7 @@ enum Cmd {
     Outline(PathBuf),
     Show(String),
     Map(Option<PathBuf>),
+    Refs(RefKind, String),
 }
 
 struct Cli {
@@ -145,9 +147,19 @@ fn command(name: &OsStr, pos: &[&OsString], flags: &Flags) -> Res<Cmd> {
         (Some("files"), [t]) => Cmd::Files(term(t)?),
         (Some("show"), [t]) => Cmd::Show(term(t)?),
         (Some("outline"), [f]) => Cmd::Outline(PathBuf::from(f)),
+        (Some("refs"), [t]) => Cmd::Refs(RefKind::Refs, term(t)?),
+        (Some("callers"), [t]) => Cmd::Refs(RefKind::Callers, term(t)?),
+        (Some("impls"), [t]) => Cmd::Refs(RefKind::Impls, term(t)?),
+        (Some("supers"), [t]) => Cmd::Refs(RefKind::Supers, term(t)?),
         (Some("map"), []) => Cmd::Map(None),
         (Some("map"), [d]) => Cmd::Map(Some(PathBuf::from(d))),
-        (Some("update" | "find" | "files" | "show" | "outline" | "map"), _) => {
+        (
+            Some(
+                "update" | "find" | "files" | "show" | "outline" | "map" | "refs" | "callers"
+                | "impls" | "supers",
+            ),
+            _,
+        ) => {
             return Err(Fail::usage("wrong number of arguments"));
         }
         _ => return Err(Fail::usage("unknown subcommand")),
@@ -190,8 +202,8 @@ pub fn run(args: &[OsString], cwd: &Path, out: &mut impl Write, err: &mut impl W
 }
 
 /// 検索の前後で変わらない情報。表示する経路は、cwd が根の下にあれば cwd からの相対にする。
-struct Ctx {
-    root: PathBuf,
+pub(crate) struct Ctx {
+    pub(crate) root: PathBuf,
     cwd: PathBuf,
     prefix: Vec<u8>,
     hint: String,
@@ -215,13 +227,13 @@ impl Ctx {
         fresh::refresh(&self.root).map_err(|e| Fail::fresh(e, &self.hint))
     }
 
-    fn display(&self, path: &[u8]) -> Vec<u8> {
+    pub(crate) fn display(&self, path: &[u8]) -> Vec<u8> {
         escape_control(&relative_to(&self.prefix, path))
     }
 }
 
 /// 出力は 1 行 1 件で端末にも出るので、パスや名前の改行、ESC などの制御文字は文字列に置き換える。
-fn escape_control(path: &[u8]) -> Vec<u8> {
+pub(crate) fn escape_control(path: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(path.len());
     for &b in path {
         match b {
@@ -334,6 +346,10 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
             more(err, hits.len().saturating_sub(max))?;
             Ok(!hits.is_empty())
         }
+        Cmd::Refs(kind, t) => {
+            let ctx = Ctx::new(cwd, grep_hint(t))?;
+            refcmd::run(&ctx, &ctx.view()?, *kind, t, limit(DEFAULT_LIMIT), out, err)
+        }
         Cmd::Map(dir) => map(
             &Ctx::new(cwd, "rg --files".into())?,
             dir.as_deref(),
@@ -344,14 +360,14 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
     }
 }
 
-fn corrupt(_: Corrupt, ctx: &Ctx) -> Fail {
+pub(crate) fn corrupt(_: Corrupt, ctx: &Ctx) -> Fail {
     Fail::unusable("index is corrupt", &ctx.hint)
 }
 
 /// 完全一致、`Container.name`、名前の部分一致（ASCII の大小無視）の順に試す。
 /// Markdown の見出しは `.` を含み得るので、全体の完全一致を先に引く。
 /// 修飾の区切りは `::` も `.` と同じに扱う。
-fn resolve(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
+pub(crate) fn resolve(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
     let hits = view.lookup(term.as_bytes())?;
     if !hits.is_empty() {
         return Ok(hits);
@@ -376,7 +392,7 @@ fn resolve(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
 }
 
 /// `path:line:col kind Container.name`
-fn def_line(
+pub(crate) fn def_line(
     path: &[u8],
     line: u32,
     col: u32,
@@ -396,7 +412,7 @@ fn def_line(
 
 /// `line`（1 始まり）行目を、前後の空白を除き 160 字までにして制御文字を逃がしたもの。
 /// 行が無いとき（索引の後でファイルが縮んだ）は None。
-fn source_line(text: &[u8], line: u32) -> Option<Vec<u8>> {
+pub(crate) fn source_line(text: &[u8], line: u32) -> Option<Vec<u8>> {
     let raw = text
         .split(|&b| b == b'\n')
         .nth(line.checked_sub(1)? as usize)?;
@@ -411,7 +427,12 @@ fn source_line(text: &[u8], line: u32) -> Option<Vec<u8>> {
 }
 
 /// 表示する行を標準出力へ。全 `total` 件のうち出さなかった分は標準エラーに件数だけ出す。
-fn emit(out: &mut impl Write, err: &mut impl Write, lines: &[Vec<u8>], total: usize) -> Res {
+pub(crate) fn emit(
+    out: &mut impl Write,
+    err: &mut impl Write,
+    lines: &[Vec<u8>],
+    total: usize,
+) -> Res {
     for l in lines {
         out.write_all(l)?;
         out.write_all(b"\n")?;
@@ -420,7 +441,7 @@ fn emit(out: &mut impl Write, err: &mut impl Write, lines: &[Vec<u8>], total: us
     Ok(total > 0)
 }
 
-fn more(err: &mut impl Write, rest: usize) -> io::Result<()> {
+pub(crate) fn more(err: &mut impl Write, rest: usize) -> io::Result<()> {
     if rest > 0 {
         writeln!(err, "… {rest} more")?;
     }
