@@ -761,7 +761,7 @@ fn go_precise_failure_shows_the_reason_not_the_hint() {
     assert_eq!(o.code, 1);
     assert_eq!(
         o.err,
-        "ferrindex: --precise: gopls: goplsが見つかりません。名前一致の結果です（未確定）\n"
+        "ferrindex: --precise: gopls: goplsが見つかりません\n"
     );
     // refs は Go でも名前一致で答えられる。
     let o = r.run_with(

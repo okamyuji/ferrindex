@@ -73,12 +73,15 @@ pub(crate) fn run(
         Ok(_) => "言語サーバーの答えが0件でした".to_string(),
         Err(why) => why,
     };
+    // Go の継承は名前一致では分からないので、戻る先が無い。理由だけを出す。
+    if matches!(kind, RefKind::Impls | RefKind::Supers)
+        && only_go(&resolve(view, term).map_err(|c| corrupt(c, ctx))?)
+    {
+        writeln!(err, "ferrindex: --precise: {why}")?;
+        return Ok(false);
+    }
     let (mut found_out, mut found_err) = (Vec::new(), Vec::new());
-    // Go の継承は名前一致では分からない。`--precise` を勧める案内は、使った後には出さない。
-    let go_only = matches!(kind, RefKind::Impls | RefKind::Supers)
-        && only_go(&resolve(view, term).map_err(|c| corrupt(c, ctx))?);
-    let found =
-        !go_only && name_match(ctx, view, kind, term, limit, &mut found_out, &mut found_err)?;
+    let found = name_match(ctx, view, kind, term, limit, &mut found_out, &mut found_err)?;
     writeln!(
         err,
         "ferrindex: --precise: {why}。名前一致の結果です（未確定）"
