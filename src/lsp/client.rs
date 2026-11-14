@@ -369,14 +369,22 @@ fn read_loop(mut r: impl BufRead, tx: &Sender<Result<Value, LspError>>) {
 
 /// 1 通の本文の上限。巨大な Content-Length をそのまま確保すると、確保の失敗でプロセスごと落ちる。
 const MAX_BODY: usize = 64 << 20;
+/// ヘッダ 1 行の上限。改行の無い行を出し続けるサーバーで確保が際限なく増えるのを防ぐ。
+const MAX_HEADER: usize = 8 << 10;
 
 /// ヘッダでない行は、その行を理由にして失敗にする（jdtls は起動に失敗すると素の文を出す）。
 fn read_message(r: &mut impl BufRead) -> Result<Option<Value>, String> {
     let mut len = None;
     loop {
         let mut line = String::new();
-        if r.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+        let n = std::io::Read::take(&mut *r, MAX_HEADER as u64 + 1)
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
             return Ok(None);
+        }
+        if n > MAX_HEADER {
+            return Err(format!("ヘッダ行が上限の {MAX_HEADER} バイトを超えます"));
         }
         let line = line.trim_end();
         if line.is_empty() {
@@ -503,6 +511,18 @@ mod tests {
         assert!(err("Content-Length: x\r\n\r\n").contains("invalid digit"));
         assert!(err("Content-Length: 5\r\n\r\n{}").contains("fill whole buffer"));
         assert!(err(&framed("{")).contains("EOF"));
+    }
+
+    #[test]
+    fn read_message_rejects_a_header_line_over_the_cap() {
+        let err = |t: String| read_message(&mut Cursor::new(t)).unwrap_err();
+        // 改行を含めて上限ちょうどの行は読み切り、ヘッダでない行として扱う。
+        let fits = format!("{}\n", "x".repeat(MAX_HEADER - 1));
+        assert_eq!(err(fits.clone()), fits.trim_end());
+        assert_eq!(
+            err("x".repeat(MAX_HEADER + 1)),
+            format!("ヘッダ行が上限の {MAX_HEADER} バイトを超えます")
+        );
     }
 
     #[test]
