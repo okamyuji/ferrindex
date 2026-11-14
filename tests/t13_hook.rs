@@ -98,9 +98,7 @@ fn assert_guidance(text: &str) {
     ] {
         assert!(text.contains(needle), "missing {needle}: {text}");
     }
-    for absent in ["trust"] {
-        assert!(!text.contains(absent), "has {absent}: {text}");
-    }
+    assert!(!text.contains("trust"), "has trust: {text}");
 }
 
 #[test]

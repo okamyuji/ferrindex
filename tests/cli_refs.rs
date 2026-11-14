@@ -872,7 +872,8 @@ fn supers_compare_only_the_bases_of_the_queried_type() {
     assert_eq!(o.lines(), ["s.py:1:7 inherit\tclass A2:"]);
 }
 
-const AMBIGUOUS_NOTE: &str = "ferrindex: bar の定義が2件あります。名前一致なので、どの定義への呼び出しかを区別しません。絞るには --precise を使ってください\n";
+const UNTRUSTED_HOW: &str = "絞るには、利用者が端末で `ferrindex trust` を実行してから --precise を使います";
+const AMBIGUOUS_NOTE: &str = "ferrindex: bar の定義が2件あります。名前一致なので、どの定義への呼び出しかを区別しません。";
 
 fn two_bar_defs() -> Repo {
     let r = Repo::new();
@@ -888,7 +889,7 @@ fn name_match_notes_when_the_name_has_several_definitions() {
         let o = r.run(&[cmd, "bar"]);
         assert_eq!(o.code, 0, "{cmd}");
         assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"], "{cmd}");
-        assert_eq!(o.err, AMBIGUOUS_NOTE, "{cmd}");
+        assert_eq!(o.err, format!("{AMBIGUOUS_NOTE}{UNTRUSTED_HOW}\n"), "{cmd}");
     }
 }
 
@@ -900,7 +901,7 @@ fn name_match_notes_that_the_qualifier_is_not_used() {
         assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"], "{cmd}");
         assert_eq!(
             o.err,
-            "ferrindex: 名前一致では Foo.bar の修飾を使わず、bar の呼び出しをすべて出します。絞るには --precise を使ってください\n",
+            format!("ferrindex: 名前一致では Foo.bar の修飾を使わず、bar の呼び出しをすべて出します。{UNTRUSTED_HOW}\n"),
             "{cmd}"
         );
     }
@@ -911,7 +912,7 @@ fn name_match_note_comes_before_the_more_line() {
     let r = two_bar_defs();
     r.write("use.rs", "fn user(x: Foo) {\n    x.bar();\n    x.bar();\n}\n");
     let o = r.run(&["callers", "bar", "--limit", "1"]);
-    assert_eq!(o.err, format!("{AMBIGUOUS_NOTE}… 1 more\n"));
+    assert_eq!(o.err, format!("{AMBIGUOUS_NOTE}{UNTRUSTED_HOW}\n… 1 more\n"));
 }
 
 #[test]
@@ -922,4 +923,28 @@ fn name_match_has_no_note_for_a_single_definition_or_no_hit() {
     let r = two_bar_defs();
     let o = r.run(&["callers", "Foo.nothing"]);
     assert_eq!((o.code, o.err.as_str()), (1, ""));
+}
+
+#[test]
+fn name_match_note_points_at_precise_in_a_trusted_repository() {
+    let r = two_bar_defs();
+    r.trust();
+    let o = r.run(&["callers", "bar"]);
+    assert_eq!(
+        o.err,
+        format!("{AMBIGUOUS_NOTE}絞るには --precise を使ってください\n")
+    );
+}
+
+#[test]
+fn name_match_still_answers_when_the_trust_list_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = two_bar_defs();
+    let list = common::data_home(&r.xdg).join("ferrindex");
+    std::fs::create_dir_all(&list).unwrap();
+    std::fs::set_permissions(&list, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let o = r.run(&["callers", "bar"]);
+    std::fs::set_permissions(&list, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"]);
 }

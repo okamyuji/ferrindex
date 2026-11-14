@@ -129,10 +129,17 @@ fn name_match(
 /// 名前一致は呼び先の定義を区別しない。結果をそのまま答えに使われないよう、混ざりうるときに知らせる。
 fn ambiguity_note(ctx: &Ctx, view: &View, term: &str, err: &mut impl Write) -> Res<()> {
     let name = last_segment(term);
+    // 未信頼では --precise もサーバーを起動しない。Claude は trust を実行できないので、利用者の手順を示す。
+    // 一覧が読めなくても名前一致の結果は返す。読めない理由は --precise が示す。
+    let how = if trust::is_trusted(&ctx.root).unwrap_or(false) {
+        "絞るには --precise を使ってください"
+    } else {
+        "絞るには、利用者が端末で `ferrindex trust` を実行してから --precise を使います"
+    };
     if name != term {
         writeln!(
             err,
-            "ferrindex: 名前一致では {term} の修飾を使わず、{name} の呼び出しをすべて出します。絞るには --precise を使ってください"
+            "ferrindex: 名前一致では {term} の修飾を使わず、{name} の呼び出しをすべて出します。{how}"
         )?;
         return Ok(());
     }
@@ -145,7 +152,7 @@ fn ambiguity_note(ctx: &Ctx, view: &View, term: &str, err: &mut impl Write) -> R
     if defs > 1 {
         writeln!(
             err,
-            "ferrindex: {name} の定義が{defs}件あります。名前一致なので、どの定義への呼び出しかを区別しません。絞るには --precise を使ってください"
+            "ferrindex: {name} の定義が{defs}件あります。名前一致なので、どの定義への呼び出しかを区別しません。{how}"
         )?;
     }
     Ok(())
