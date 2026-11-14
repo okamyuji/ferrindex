@@ -142,7 +142,9 @@ impl World {
     fn rename(&mut self) {
         let to = self.random_path();
         if let Some(from) = self.existing().filter(|f| *f != to) {
-            fs::rename(self.repo.root.join(&from), self.repo.root.join(&to)).unwrap();
+            let dest = self.repo.root.join(&to);
+            fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            fs::rename(self.repo.root.join(&from), dest).unwrap();
         }
     }
 
