@@ -79,8 +79,14 @@ pub fn tags_config(lang: Lang) -> Option<&'static TagsConfiguration> {
 fn build(lang: Lang) -> TagsConfiguration {
     let js = tree_sitter_javascript::TAGS_QUERY;
     let (language, query): (Language, String) = match lang {
-        Lang::Rust => (tree_sitter_rust::LANGUAGE.into(), tree_sitter_rust::TAGS_QUERY.into()),
-        Lang::Python => (tree_sitter_python::LANGUAGE.into(), tree_sitter_python::TAGS_QUERY.into()),
+        Lang::Rust => (
+            tree_sitter_rust::LANGUAGE.into(),
+            tree_sitter_rust::TAGS_QUERY.into(),
+        ),
+        Lang::Python => (
+            tree_sitter_python::LANGUAGE.into(),
+            tree_sitter_python::TAGS_QUERY.into(),
+        ),
         // TS の tags query は JS の query を継承する前提で書かれている
         Lang::TypeScript => (
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -91,11 +97,26 @@ fn build(lang: Lang) -> TagsConfiguration {
             format!("{js}\n{}", tree_sitter_typescript::TAGS_QUERY),
         ),
         Lang::JavaScript => (tree_sitter_javascript::LANGUAGE.into(), js.into()),
-        Lang::Go => (tree_sitter_go::LANGUAGE.into(), tree_sitter_go::TAGS_QUERY.into()),
-        Lang::Ruby => (tree_sitter_ruby::LANGUAGE.into(), tree_sitter_ruby::TAGS_QUERY.into()),
-        Lang::Java => (tree_sitter_java::LANGUAGE.into(), tree_sitter_java::TAGS_QUERY.into()),
-        Lang::C => (tree_sitter_c::LANGUAGE.into(), tree_sitter_c::TAGS_QUERY.into()),
-        Lang::Cpp => (tree_sitter_cpp::LANGUAGE.into(), tree_sitter_cpp::TAGS_QUERY.into()),
+        Lang::Go => (
+            tree_sitter_go::LANGUAGE.into(),
+            tree_sitter_go::TAGS_QUERY.into(),
+        ),
+        Lang::Ruby => (
+            tree_sitter_ruby::LANGUAGE.into(),
+            tree_sitter_ruby::TAGS_QUERY.into(),
+        ),
+        Lang::Java => (
+            tree_sitter_java::LANGUAGE.into(),
+            tree_sitter_java::TAGS_QUERY.into(),
+        ),
+        Lang::C => (
+            tree_sitter_c::LANGUAGE.into(),
+            tree_sitter_c::TAGS_QUERY.into(),
+        ),
+        Lang::Cpp => (
+            tree_sitter_cpp::LANGUAGE.into(),
+            tree_sitter_cpp::TAGS_QUERY.into(),
+        ),
         // `@module` だけを捕捉するパターンを tree-sitter-tags が InvalidCapture で拒否する
         Lang::CSharp => (
             tree_sitter_c_sharp::LANGUAGE.into(),
@@ -105,9 +126,18 @@ fn build(lang: Lang) -> TagsConfiguration {
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-        Lang::Swift => (tree_sitter_swift::LANGUAGE.into(), tree_sitter_swift::TAGS_QUERY.into()),
-        Lang::Dart => (tree_sitter_dart::LANGUAGE.into(), tree_sitter_dart::TAGS_QUERY.into()),
-        Lang::Lua => (tree_sitter_lua::LANGUAGE.into(), tree_sitter_lua::TAGS_QUERY.into()),
+        Lang::Swift => (
+            tree_sitter_swift::LANGUAGE.into(),
+            tree_sitter_swift::TAGS_QUERY.into(),
+        ),
+        Lang::Dart => (
+            tree_sitter_dart::LANGUAGE.into(),
+            tree_sitter_dart::TAGS_QUERY.into(),
+        ),
+        Lang::Lua => (
+            tree_sitter_lua::LANGUAGE.into(),
+            tree_sitter_lua::TAGS_QUERY.into(),
+        ),
         Lang::Markdown => unreachable!("tags_config は Markdown を弾く"),
     };
     TagsConfiguration::new(language, &query, "")
@@ -139,7 +169,11 @@ mod tests {
     #[test]
     fn every_language_query_compiles() {
         for lang in Lang::ALL {
-            assert_eq!(tags_config(lang).is_some(), lang != Lang::Markdown, "{lang:?}");
+            assert_eq!(
+                tags_config(lang).is_some(),
+                lang != Lang::Markdown,
+                "{lang:?}"
+            );
         }
     }
 
@@ -156,8 +190,18 @@ mod tests {
     #[test]
     fn kind_ids_are_fixed() {
         let names = [
-            "other", "class", "constant", "function", "interface", "macro", "method", "module", "property", "type",
-            "variable", "section",
+            "other",
+            "class",
+            "constant",
+            "function",
+            "interface",
+            "macro",
+            "method",
+            "module",
+            "property",
+            "type",
+            "variable",
+            "section",
         ];
         for (id, name) in names.iter().enumerate() {
             assert_eq!(kind_id(name) as usize, id, "{name}");
