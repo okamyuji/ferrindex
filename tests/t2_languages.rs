@@ -304,6 +304,29 @@ fn csharp_defs_and_bodies() {
 }
 
 #[test]
+fn rust_trait_method_declarations_belong_to_the_trait() {
+    let r = rows("rust/trait.rs");
+    check(
+        row(&r, "area"),
+        "method",
+        2,
+        Some("Shape"),
+        "fn area(&self) -> i32;",
+    );
+    check(
+        row(&r, "name"),
+        "method",
+        3,
+        Some("Shape"),
+        "fn name(&self) -> &str {\n        \"shape\"\n    }",
+    );
+    assert!(
+        r.iter().all(|x| x.0 != "ext"),
+        "extern の宣言は取らない: {r:?}"
+    );
+}
+
+#[test]
 fn java_enums_records_and_annotation_types_are_classes() {
     let r = rows("java/Types.java");
     check(

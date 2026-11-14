@@ -83,9 +83,13 @@ const JAVA_EXTRA: &str = "\
 (record_declaration name: (identifier) @name) @definition.class
 (annotation_type_declaration name: (identifier) @name) @definition.class";
 
+/// 本体の無いトレイトのメソッド宣言。`extern` ブロックの関数宣言は対象にしない。
+const RUST_EXTRA: &str = "\
+(trait_item body: (declaration_list (function_signature_item name: (identifier) @name) @definition.method))";
+
 /// 追加した query の全文。索引の指紋の入力にする。
 pub fn extra_queries() -> String {
-    format!("{CSHARP_EXTRA}\n{GO_EXTRA}\n{JAVA_EXTRA}")
+    format!("{CSHARP_EXTRA}\n{GO_EXTRA}\n{JAVA_EXTRA}\n{RUST_EXTRA}")
 }
 
 static CONFIGS: [OnceLock<TagsConfiguration>; Lang::ALL.len()] =
@@ -105,7 +109,7 @@ fn build(lang: Lang) -> TagsConfiguration {
     let (language, query): (Language, String) = match lang {
         Lang::Rust => (
             tree_sitter_rust::LANGUAGE.into(),
-            tree_sitter_rust::TAGS_QUERY.into(),
+            format!("{}\n{RUST_EXTRA}", tree_sitter_rust::TAGS_QUERY),
         ),
         Lang::Python => (
             tree_sitter_python::LANGUAGE.into(),
@@ -229,7 +233,7 @@ mod tests {
     fn extra_queries_feed_the_index_fingerprint() {
         let all = extra_queries();
         assert!(
-            [CSHARP_EXTRA, GO_EXTRA, JAVA_EXTRA]
+            [CSHARP_EXTRA, GO_EXTRA, JAVA_EXTRA, RUST_EXTRA]
                 .iter()
                 .all(|q| all.contains(q))
         );
