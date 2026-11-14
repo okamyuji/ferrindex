@@ -7,6 +7,7 @@ rust-version = "1.100"
 [dependencies]
 crc32c = "0.6.9"
 fst = "0.4.7"
+ignore = "0.4.34"
 memmap2 = "0.9.12"
 tree-sitter = "0.27.2"
 tree-sitter-c = "0.24.2"

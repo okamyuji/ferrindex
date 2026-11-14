@@ -367,6 +367,46 @@ impl Index {
         })
     }
 
+    pub fn has_path(&self, path: &[u8]) -> bool {
+        self.paths.contains_key(path)
+    }
+
+    /// 全ファイルを定義つきで復元する。`body` は保存していないので空範囲になる。
+    pub fn entries(&self) -> Result<Vec<FileEntry>, Corrupt> {
+        let mut out: Vec<FileEntry> = self
+            .files()
+            .map(|(path, s)| FileEntry {
+                path,
+                mtime_ns: s.mtime_ns,
+                size: s.size,
+                lang: s.lang,
+                defs: Vec::new(),
+            })
+            .collect();
+        let mut names = self.names.stream();
+        while let Some((name, rank)) = names.next() {
+            let name = String::from_utf8(name.to_vec()).map_err(|_| Corrupt)?;
+            let slice = self.postings_range(rank as usize).ok_or(Corrupt)?;
+            for row in decode_rows(slice, self.files, self.names_len)? {
+                let container = self
+                    .container_name(&row)
+                    .map(String::from_utf8)
+                    .transpose()
+                    .map_err(|_| Corrupt)?;
+                let file = out.get_mut(row.file as usize).ok_or(Corrupt)?;
+                file.defs.push(Def {
+                    name: name.clone(),
+                    line: row.line,
+                    col: row.col,
+                    kind: row.kind,
+                    container,
+                    body: 0..0,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     pub fn stats(&self) -> Stats {
         Stats {
             files: self.files as usize,
@@ -497,6 +537,27 @@ mod tests {
                 lang: 7
             }
         );
+    }
+
+    #[test]
+    fn entries_restores_what_was_written() {
+        let (_d, p) = written(&sample());
+        let mut got = Index::open(&p).unwrap().entries().unwrap();
+        for f in &mut got {
+            f.defs.sort_by_key(|d| (d.line, d.col));
+        }
+        let mut want = sample();
+        want.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn has_path_matches_exact_keys() {
+        let (_d, p) = written(&sample());
+        let ix = Index::open(&p).unwrap();
+        assert!(ix.has_path(b"src/a.rs"));
+        assert!(!ix.has_path(b"src/a"));
+        assert!(!ix.has_path(b"src/c.rs"));
     }
 
     #[test]
