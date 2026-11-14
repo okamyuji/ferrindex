@@ -82,6 +82,9 @@ fn assert_guidance(text: &str) {
         "ferrindex show <名前>",
         "ferrindex outline <file>",
         "ferrindex files <部分文字列>",
+        "各行に定義の行が付く",
+        "find と Read ではなく `ferrindex show <名前>` を直接",
+        "呼び出し元と使用箇所は `rg -n`",
         "終了コード 3",
         "rg -n",
     ] {

@@ -16,9 +16,9 @@ fn cwd_of(input: &str) -> Option<PathBuf> {
     v.get("cwd")?.as_str().map(PathBuf::from)
 }
 
-const GUIDANCE: &str = "このリポジトリでは ferrindex の索引を使えます。
-定義の場所は `ferrindex find <名前>`（`Class.method` も可）、定義の本体だけは `ferrindex show <名前>`、ファイルの定義一覧は `ferrindex outline <file>`、ファイル名は `ferrindex files <部分文字列>` で引いてください。ファイル全体を Read する前に使ってください。
-終了コード 3 のときは `rg -n` を使ってください。
+const GUIDANCE: &str = "このリポジトリでは ferrindex の索引を使えます。定義の場所は `ferrindex find <名前>`（`Class.method` も可）で引いてください。各行に定義の行が付くので、確認のための grep や Read は要りません。
+本体が要るときは find と Read ではなく `ferrindex show <名前>` を直接使ってください。ファイルの定義一覧は `ferrindex outline <file>`、ファイル名は `ferrindex files <部分文字列>` で引けます。
+呼び出し元と使用箇所は `rg -n` で探してください。終了コード 3 のときも `rg -n` を使ってください。
 ";
 
 const BUILDING: &str = "索引を背景で作成中です。最初の検索は待つことがあります。\n";
