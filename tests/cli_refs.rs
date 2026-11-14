@@ -1026,3 +1026,31 @@ fn refs_beyond_the_limit_are_counted_without_rendering() {
     // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
     assert!(large < small * 8, "{small:?} -> {large:?}");
 }
+
+#[test]
+fn precise_drops_answers_that_leave_the_root_through_a_symlink() {
+    use std::os::unix::fs::symlink;
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("o.rs"), C_SRC).unwrap();
+    symlink(outside.path().join("o.rs"), r.root.join("out.rs")).unwrap();
+    symlink(r.root.join("c.rs"), r.root.join("in.rs")).unwrap();
+    let o = precise(
+        &r,
+        &[(
+            "FAKE_REFS",
+            r#"[["a.rs", 3, 4], ["out.rs", 1, 12], ["in.rs", 1, 12]]"#,
+        )],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    // 根の中を指す symlink は、今までどおり答えのパスで出す。
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "in.rs:2:13 ref in other\tlet g = target;",
+        ]
+    );
+}

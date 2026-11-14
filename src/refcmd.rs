@@ -7,7 +7,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
     fs,
-    io::Write,
+    io::{self, Write},
     os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
     time::{Duration, Instant},
@@ -303,14 +303,18 @@ type TypeAt = Option<(Vec<u8>, String)>;
 /// 各位置の型（その位置に名前のある定義、無ければ囲む最も内側の定義）の（パス、名前）。
 /// サーバーは型の名前の位置（Dart の analysis server）か、宣言の先頭を返す。
 fn types_at(ctx: &Ctx, root: &Path, found: &[Location]) -> Res<Vec<TypeAt>> {
-    let mut parsed: HashMap<&Path, Option<Parsed>> = HashMap::new();
+    let mut parsed: HashMap<PathBuf, Option<Parsed>> = HashMap::new();
     found
         .iter()
         .map(|loc| {
             let Ok(rel) = loc.path.strip_prefix(root) else {
                 return Ok(None);
             };
-            let Some((src, defs, _)) = cached(&mut parsed, rel, || parse(ctx, rel))?.as_ref()
+            let Some(real) = real_rel(root, rel)? else {
+                return Ok(None);
+            };
+            let Some((src, defs, _)) =
+                cached(&mut parsed, real.clone(), || parse(ctx, &real))?.as_ref()
             else {
                 return Ok(None);
             };
@@ -376,6 +380,20 @@ fn bases(ctx: &Ctx, defs: &[Found]) -> Res<Vec<String>> {
     Ok(out)
 }
 
+/// symlink を解決したパスの、根からの相対。根の外か、無いファイルなら None。答えのファイルは
+/// このパスで読み、symlink で根の外を指す位置は読まずに捨てる。
+fn real_rel(root: &Path, rel: &Path) -> Res<Option<PathBuf>> {
+    match fs::canonicalize(root.join(rel)) {
+        Ok(real) => Ok(real.strip_prefix(root).ok().map(Path::to_path_buf)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            let path = escape_control(rel.as_os_str().as_bytes());
+            let msg = format!("{}: {e}", String::from_utf8_lossy(&path));
+            Err(io::Error::new(e.kind(), msg).into())
+        }
+    }
+}
+
 fn inside(root: &Path, path: &Path) -> bool {
     path.strip_prefix(root)
         .is_ok_and(|rel| !rel.components().any(|c| c == Component::ParentDir))
@@ -410,13 +428,17 @@ fn misses_a_call(
 /// 位置ごとにファイルを抽出し直し、その位置の参照の種類と、囲む最も内側の定義を添える。
 /// 作業ツリーの外の位置（依存ライブラリなど）は出さない。
 fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8) -> Res<Vec<Vec<u8>>> {
-    let mut parsed: HashMap<&Path, Option<Parsed>> = HashMap::new();
+    let mut parsed: HashMap<PathBuf, Option<Parsed>> = HashMap::new();
     let mut lines = Vec::new();
     for loc in found {
         let Ok(rel) = loc.path.strip_prefix(root) else {
             continue;
         };
-        let Some((src, defs, refs)) = cached(&mut parsed, rel, || parse(ctx, rel))? else {
+        let Some(real) = real_rel(root, rel)? else {
+            continue;
+        };
+        let Some((src, defs, refs)) = cached(&mut parsed, real.clone(), || parse(ctx, &real))?
+        else {
             continue;
         };
         let at = (loc.line, loc.col);

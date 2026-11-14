@@ -80,3 +80,27 @@ fn update_names_a_file_it_cannot_read() {
     assert_eq!(o.code, 4, "{}", o.err);
     assert!(o.err.starts_with("ferrindex: a\\x1bb.rs: "), "{}", o.err);
 }
+
+#[test]
+fn precise_fails_when_an_answered_path_cannot_be_resolved() {
+    let r = Repo::new();
+    r.write("a.rs", A_RS);
+    r.age();
+    assert_eq!(r.run(&["update"]).code, 0);
+    r.trust();
+    // 自分を指す symlink は解決できない（ELOOP）。
+    std::os::unix::fs::symlink("loop.rs", r.root.join("loop.rs")).unwrap();
+    let server = format!(
+        "python3 -I {}/tests/fixtures/fake_lsp.py",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let o = r.run_with(
+        &[
+            ("FERRINDEX_LSP_RUST", &server),
+            ("FAKE_REFS", r#"[["a.rs", 2, 4], ["loop.rs", 0, 0]]"#),
+        ],
+        &["refs", "helper", "--precise"],
+    );
+    assert_eq!(o.code, 4, "{}", o.err);
+    assert!(o.err.starts_with("ferrindex: loop.rs: "), "{}", o.err);
+}
