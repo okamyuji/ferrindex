@@ -599,3 +599,50 @@ fn ruby_singleton_and_js_prototype_methods_get_their_owner() {
     assert_eq!(j("Foo.f = function() {};"), Some("Foo".into()));
     assert_eq!(j("f = function() {};"), None);
 }
+
+#[test]
+fn deeply_nested_owner_expressions_do_not_overflow_the_stack() {
+    let nested = |depth: usize| {
+        format!(
+            "{}Foo{}.f = function(){{}};\n",
+            "(".repeat(depth),
+            ")".repeat(depth)
+        )
+    };
+    let f = |depth: usize| container_of(Lang::JavaScript, &nested(depth), "f");
+    assert_eq!(f(1), Some("Foo".into()));
+    assert_eq!(f(63), Some("Foo".into()));
+    assert_eq!(f(64), None);
+    // 型名が見つからないだけで、定義そのものは残る
+    assert_eq!(f(100_000), None);
+}
+
+#[test]
+fn swift_member_far_below_its_class_keeps_the_stack_container() {
+    let depth = 40;
+    let mut src = String::from("class Outer {\n");
+    for i in 0..depth {
+        src.push_str(&format!("func a{i}() {{\n"));
+    }
+    src.push_str("func f() {}\n");
+    src.push_str(&"}\n".repeat(depth));
+    src.push_str("}\n");
+    assert_eq!(container_of(Lang::Swift, &src, "f"), Some("Outer".into()));
+    assert_eq!(container_of(Lang::Swift, &src, "a39"), Some("Outer".into()));
+}
+
+#[test]
+fn swift_extension_owner_is_found_only_within_the_climb_cap() {
+    let nested = |depth: usize| {
+        let mut src = String::from("extension K {\n");
+        for i in 0..depth {
+            src.push_str(&format!("func a{i}() {{\n"));
+        }
+        src.push_str("func f() {}\n");
+        src.push_str(&"}\n".repeat(depth + 1));
+        src
+    };
+    assert_eq!(container_of(Lang::Swift, &nested(0), "f"), Some("K".into()));
+    assert_eq!(container_of(Lang::Swift, &nested(1), "f"), Some("K".into()));
+    assert_eq!(container_of(Lang::Swift, &nested(40), "f"), None);
+}

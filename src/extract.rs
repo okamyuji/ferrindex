@@ -118,7 +118,11 @@ fn outer_type(lang: Lang, body: Node<'_>, name: Node<'_>, src: &[u8]) -> Option<
                 .filter(|p| p.kind() == "impl_item")?;
             imp.child_by_field_name("type")?
         }
-        Lang::Go => body.child_by_field_name("receiver")?,
+        // レシーバ名ではなく型だけを見る
+        Lang::Go => body
+            .child_by_field_name("receiver")?
+            .named_child(0)?
+            .child_by_field_name("type")?,
         Lang::Cpp => name
             .parent()
             .filter(|p| p.kind() == "qualified_identifier")?
@@ -147,8 +151,14 @@ fn outer_type(lang: Lang, body: Node<'_>, name: Node<'_>, src: &[u8]) -> Option<
     first_type_name(owner, src, lang)
 }
 
-/// 型名の最初の識別子。ジェネリクスや `*`、`&` は読み飛ばす。
-fn first_type_name(n: Node<'_>, src: &[u8], lang: Lang) -> Option<String> {
+/// 型名の探索で辿る段数の上限。深く入れ子にした入力でスタックや時間を使い切らないため。
+const TYPE_NAME_STEPS: usize = 64;
+/// 親をたどる段数の上限。メンバーは囲む宣言の数段下にある。
+const ANCESTOR_STEPS: usize = 16;
+
+/// 型名の識別子。`name` / `type` フィールドか最初の子を辿るので、ジェネリクスや `*`、`&`、
+/// `a::Foo`、`Foo.prototype` を読み飛ばせる。上限を超えたら None。
+fn first_type_name(mut n: Node<'_>, src: &[u8], lang: Lang) -> Option<String> {
     // Go のレシーバ名や Rust のパスなど、型名でない identifier を拾わない言語を分ける
     let ident = match lang {
         Lang::Lua | Lang::JavaScript | Lang::TypeScript | Lang::Tsx => "identifier",
@@ -156,12 +166,16 @@ fn first_type_name(n: Node<'_>, src: &[u8], lang: Lang) -> Option<String> {
         Lang::Cpp => "namespace_identifier",
         _ => "type_identifier",
     };
-    if n.kind() == ident {
-        return Some(String::from_utf8_lossy(&src[n.byte_range()]).into_owned());
+    for _ in 0..TYPE_NAME_STEPS {
+        if n.kind() == ident {
+            return Some(String::from_utf8_lossy(&src[n.byte_range()]).into_owned());
+        }
+        n = n
+            .child_by_field_name("name")
+            .or_else(|| n.child_by_field_name("type"))
+            .or_else(|| n.named_child(0))?;
     }
-    let mut cursor = n.walk();
-    n.named_children(&mut cursor)
-        .find_map(|c| first_type_name(c, src, lang))
+    None
 }
 
 /// 範囲が同じ入れ子のノードの一番外側（Dart は method_signature と function_signature が同じ範囲になる）。
@@ -173,7 +187,8 @@ fn outermost(mut n: Node<'_>) -> Node<'_> {
 }
 
 fn ancestor<'a>(mut n: Node<'a>, pred: impl Fn(Node<'a>) -> bool) -> Option<Node<'a>> {
-    while let Some(p) = n.parent() {
+    for _ in 0..ANCESTOR_STEPS {
+        let p = n.parent()?;
         if pred(p) {
             return Some(p);
         }
