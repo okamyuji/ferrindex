@@ -506,3 +506,15 @@ fn many_references_on_one_line_take_linear_time() {
     // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
     assert!(large < small * 8, "{small:?} -> {large:?}");
 }
+
+#[test]
+fn rust_lifetime_bounds_are_not_supertraits() {
+    let src = "trait C: 'static + Base {}\ntrait D where Self: 'a {}\n";
+    let refs = refs_of(Lang::Rust, src.as_bytes());
+    let inherit: Vec<&str> = refs
+        .iter()
+        .filter(|r| r.kind == REF_INHERIT)
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(inherit, ["Base"]);
+}

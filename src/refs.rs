@@ -30,8 +30,16 @@ const CLASSIFY_DEPTH: usize = 3;
 const IMPL_TRAIT_DEPTH: usize = 3;
 /// 分類のときに数えずに飛ばす括弧の数の上限。
 const PAREN_SKIP: usize = 16;
-/// ブロックや無名関数の引数と中身は、外側の call の一部ではない。
-const SCOPE_WORDS: [&str; 5] = ["block", "lambda", "closure", "parameter", "arrow_function"];
+/// ブロックや無名関数の引数と中身は、外側の call の一部ではない。Rust の `'static` の `static` は
+/// 識別子の葉だが、型でも呼び出しでもないので、`lifetime` の中も外側の文脈を受け継がない。
+const SCOPE_WORDS: [&str; 6] = [
+    "block",
+    "lambda",
+    "closure",
+    "parameter",
+    "arrow_function",
+    "lifetime",
+];
 const CALL_WORDS: [&str; 3] = ["call", "invocation", "send"];
 const INHERIT_WORDS: [&str; 10] = [
     "superclass",
