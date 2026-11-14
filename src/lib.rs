@@ -6,6 +6,7 @@ pub mod hook;
 pub mod index;
 pub mod intern;
 pub mod lang;
+pub mod lsp;
 mod markdown;
 pub mod query;
 mod refcmd;
