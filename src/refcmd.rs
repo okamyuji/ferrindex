@@ -196,9 +196,12 @@ fn located(ctx: &Ctx, found: &[Location], plain: u8) -> Vec<Vec<u8>> {
 /// ファイルの内容と、抽出し直した定義と参照。
 type Parsed = (Vec<u8>, Vec<Def>, Vec<Ref>);
 
+/// 言語の決まらないファイル（サーバーが返した設定ファイルなど）は、定義と参照を空にして行だけ出す。
 fn parse(ctx: &Ctx, rel: &Path) -> Option<Parsed> {
-    let lang = lang_of(rel)?;
     let src = read_text(ctx, rel.as_os_str().as_bytes())?;
+    let Some(lang) = lang_of(rel) else {
+        return Some((src, Vec::new(), Vec::new()));
+    };
     let defs = extract(lang, &src);
     let refs = extract_refs(lang, &src, &defs);
     Some((src, defs, refs))

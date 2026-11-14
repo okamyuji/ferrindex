@@ -431,3 +431,15 @@ fn precise_belongs_to_the_reference_commands() {
     assert_eq!(o.code, 2);
     assert!(o.err.contains("--precise"), "{}", o.err);
 }
+
+#[test]
+fn precise_keeps_results_in_files_without_a_language() {
+    let r = repo();
+    r.write("notes.txt", "see target here\n");
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["notes.txt", 0, 4]]"#)],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.lines(), ["notes.txt:1:5 ref\tsee target here"]);
+}
