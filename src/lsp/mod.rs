@@ -49,7 +49,7 @@ impl fmt::Display for LspError {
             LspError::StartFailed(why) => write!(f, "起動できませんでした（{why}）"),
             LspError::Timeout => write!(f, "期限内に答えがありませんでした"),
             LspError::Unsettled => write!(f, "答えが期限内に定まりませんでした"),
-            LspError::Unsupported(what) => write!(f, "{what}は言語サーバーで調べられません"),
+            LspError::Unsupported(what) => write!(f, "{what}には言語サーバーがありません"),
             LspError::Protocol(why) => write!(f, "応答を読めませんでした（{why}）"),
         }
     }
@@ -167,7 +167,7 @@ mod tests {
             (LspError::Unsettled, "答えが期限内に定まりませんでした"),
             (
                 LspError::Unsupported("Markdown"),
-                "Markdownは言語サーバーで調べられません",
+                "Markdownには言語サーバーがありません",
             ),
             (
                 LspError::Protocol("y".into()),

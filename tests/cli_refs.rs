@@ -593,3 +593,20 @@ fn precise_uses_only_exact_definitions() {
     assert_eq!(o.out, "");
     assert!(o.err.contains("targの定義が見つかりません"), "{}", o.err);
 }
+
+#[test]
+fn markdown_sections_are_not_asked() {
+    let r = repo();
+    r.write("doc.md", "# Notes\n\n## target\n");
+    let log = r.xdg.with_file_name("log");
+    let o = precise(
+        &r,
+        &[
+            ("FAKE_REFS", r#"[["a.rs", 3, 4]]"#),
+            ("FAKE_LOG", log.to_str().unwrap()),
+        ],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["a.rs:4:5 call in caller_fn\ttarget();"]);
+}

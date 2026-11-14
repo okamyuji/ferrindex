@@ -15,7 +15,7 @@ use std::{
 
 use crate::extract::{Def, extract};
 use crate::fresh::{Found, View, is_binary};
-use crate::lang::{Lang, lang_of};
+use crate::lang::{Lang, kind_id, lang_of};
 use crate::lsp::{self, Location, Method};
 use crate::query::{Ctx, Res, corrupt, emit, escape_control, resolve, resolve_exact, source_line};
 use crate::refs::{REF_CALL, REF_INHERIT, REF_PLAIN, Ref, extract_refs};
@@ -145,7 +145,10 @@ fn precise_lines(
     kind: RefKind,
     term: &str,
 ) -> Res<Result<Vec<Vec<u8>>, String>> {
-    let defs = resolve_exact(view, term).map_err(|c| corrupt(c, ctx))?;
+    let mut defs = resolve_exact(view, term).map_err(|c| corrupt(c, ctx))?;
+    // Markdown の見出しには言語サーバーが無い。コードの定義だけを問う。
+    let section = kind_id("section");
+    defs.retain(|d| d.kind != section);
     if defs.is_empty() {
         return Ok(Err(format!("{term}の定義が見つかりません")));
     }
