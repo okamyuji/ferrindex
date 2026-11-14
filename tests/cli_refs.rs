@@ -623,3 +623,27 @@ fn markdown_only_definition_reason_names_no_server() {
         "ferrindex: --precise: lonelyの定義が見つかりません。名前一致の結果です（未確定）\n"
     );
 }
+
+#[test]
+fn go_precise_failure_shows_the_reason_not_the_hint() {
+    let r = Repo::new();
+    r.write(
+        "p.go",
+        "package p\n\ntype Provider interface {\n\tGet() int\n}\n\ntype X struct{}\n\nfunc (X) Get() int { return 0 }\n\nvar _ Provider = X{}\n",
+    );
+    let o = r.run_with(
+        &[("FERRINDEX_LSP_GO", "/nonexistent/x")],
+        &["impls", "Provider", "--precise"],
+    );
+    assert_eq!(o.code, 1);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: gopls: goplsが見つかりません。名前一致の結果です（未確定）\n"
+    );
+    // refs は Go でも名前一致で答えられる。
+    let o = r.run_with(
+        &[("FERRINDEX_LSP_GO", "/nonexistent/x")],
+        &["refs", "Provider", "--precise"],
+    );
+    assert_eq!(o.lines().len(), 1, "{}", o.err);
+}

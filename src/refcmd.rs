@@ -72,7 +72,11 @@ pub(crate) fn run(
         Err(why) => Some(why),
     };
     let (mut found_out, mut found_err) = (Vec::new(), Vec::new());
-    let found = name_match(ctx, view, kind, term, limit, &mut found_out, &mut found_err)?;
+    // Go の継承は名前一致では分からない。`--precise` を勧める案内は、使った後には出さない。
+    let go_only = matches!(kind, RefKind::Impls | RefKind::Supers)
+        && only_go(&resolve(view, term).map_err(|c| corrupt(c, ctx))?);
+    let found =
+        !go_only && name_match(ctx, view, kind, term, limit, &mut found_out, &mut found_err)?;
     // 0件どうしなら答えは食い違っていないので、戻ったとは告げない。
     let why = match why {
         Some(why) => Some(why),
