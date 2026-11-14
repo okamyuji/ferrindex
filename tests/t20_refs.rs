@@ -318,7 +318,10 @@ fn receiver_is_plain_and_member_name_is_call() {
             Lang::CSharp,
             "class A { void g() { obj.method(); a.b.c(); } }\n",
         ),
-        (Lang::TypeScript, "function g() { obj.method(); a.b.c(); }\n"),
+        (
+            Lang::TypeScript,
+            "function g() { obj.method(); a.b.c(); }\n",
+        ),
         (Lang::Swift, "func g() { obj.method(); a.b.c() }\n"),
         (Lang::Dart, "void g() { obj.method(); a.b.c(); }\n"),
     ];
@@ -441,3 +444,32 @@ fn rust_supertraits_are_inherit_references_but_generic_bounds_are_not() {
     );
 }
 
+#[test]
+fn columns_follow_multibyte_text_across_lines() {
+    let src = "fn f() {\n    \"é😀\"; a(); b();\n    c(); \"😀\"; d();\n}\n";
+    let refs = refs_of(Lang::Rust, src.as_bytes());
+    for r in &refs {
+        let line = src.lines().nth(r.line as usize - 1).unwrap();
+        let byte = line.find(&format!("{}(", r.name)).unwrap();
+        let want = line[..byte].encode_utf16().count() as u32 + 1;
+        assert_eq!(r.col, want, "{}", r.name);
+    }
+    assert_eq!(refs.len(), 4);
+}
+
+/// 1 行に並ぶ参照の数を倍にしても、時間はほぼ倍に収まる（二乗なら 4 倍）。
+#[test]
+fn many_references_on_one_line_take_linear_time() {
+    let time = |n: usize| {
+        let src = format!("function x(){{}}{}", "x();".repeat(n));
+        let start = std::time::Instant::now();
+        let found = refs_of(Lang::JavaScript, src.as_bytes());
+        assert_eq!(found.len(), n);
+        start.elapsed()
+    };
+    time(1000);
+    let small = time(4000);
+    let large = time(16000);
+    // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
+    assert!(large < small * 8, "{small:?} -> {large:?}");
+}

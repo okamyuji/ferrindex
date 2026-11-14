@@ -66,6 +66,7 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
     let mut cursor = tree.walk();
     // 木の再帰では深い入れ子でスタックが溢れるので、祖先の種類は自前のスタックに持つ
     let mut ancestors: Vec<Step> = Vec::new();
+    let mut cols = Cols::new(src);
     // 各階層で、いまの節点より後ろにある名前付きの兄弟の数。next_named_sibling は根からたどるので使わない
     let mut afters: Vec<usize> = vec![0];
     loop {
@@ -73,7 +74,7 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
         if node.child_count() == 0 && node.is_named() && is_reference_kind(node.kind()) {
             let start = node.start_byte();
             let pos = node.start_position();
-            let (line, col) = (pos.row as u32 + 1, utf16_col(src, start));
+            let (line, col) = (pos.row as u32 + 1, cols.at(start));
             if !def_names.contains(&(line, col)) {
                 while next < order.len() && defs[order[next]].body.start <= start {
                     open.push(order[next]);
@@ -253,12 +254,51 @@ fn classify(ancestors: &[Step], leaf: Step) -> u8 {
     REF_PLAIN
 }
 
-/// 1 始まりの UTF-16 列。`start` は文字の境界で、src 全体は UTF-8 として検査済み。
-fn utf16_col(src: &[u8], start: usize) -> u32 {
-    let line_start = src[..start]
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map_or(0, |i| i + 1);
-    let prefix = std::str::from_utf8(&src[line_start..start]).unwrap_or_default();
-    prefix.encode_utf16().count() as u32 + 1
+/// 1 始まりの UTF-16 列を、前に問うた位置からの差分だけ数えて求める。木を順にたどると位置は
+/// 戻らないので、1 行に参照が多くても行頭から数え直さない。src 全体は UTF-8 として検査済み。
+struct Cols<'a> {
+    src: &'a [u8],
+    at: usize,
+    col: u32,
+}
+
+impl<'a> Cols<'a> {
+    fn new(src: &'a [u8]) -> Self {
+        Cols { src, at: 0, col: 1 }
+    }
+
+    /// `start` は文字の境界。前より手前の位置は行頭から数え直す。
+    fn at(&mut self, start: usize) -> u32 {
+        if start < self.at {
+            *self = Cols::new(self.src);
+        }
+        let gap = &self.src[self.at..start];
+        let (from, base) = match gap.iter().rposition(|&b| b == b'\n') {
+            Some(i) => (self.at + i + 1, 1),
+            None => (self.at, self.col),
+        };
+        let text = std::str::from_utf8(&self.src[from..start]).unwrap_or_default();
+        self.col = base + text.encode_utf16().count() as u32;
+        self.at = start;
+        self.col
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cols;
+
+    #[test]
+    fn cols_count_utf16_units_and_restart_when_going_back() {
+        let src = "a\u{e9}\u{1F600}b\ncd".as_bytes();
+        let mut cols = Cols::new(src);
+        assert_eq!(cols.at(0), 1);
+        assert_eq!(cols.at(1), 2);
+        // é は 2 バイト 1 単位、絵文字は 4 バイト 2 単位
+        assert_eq!(cols.at(7), 5);
+        assert_eq!(cols.at(9), 1);
+        assert_eq!(cols.at(10), 2);
+        assert_eq!(cols.at(3), 3);
+        assert_eq!(cols.at(3), 3);
+    }
 }
