@@ -102,13 +102,18 @@ fn containers(defs: &[Def], names: &[Range<usize>], labels: &[String]) -> Vec<Op
             stack.push(holders[next]);
             next += 1;
         }
-        // 自分自身は container になれないので、判定の間だけスタックから外す
-        let own = stack.pop_if(|h| *h == i);
-        while stack
-            .last()
-            .is_some_and(|&h| defs[h].body.end < names[i].end)
-        {
-            stack.pop();
+        // 期限切れを外し、自分自身は container になれないので判定の間だけ外す。
+        // 自分より上に期限切れの holder が積まれていることがあるので、一つのループで外す
+        // （`typedef struct Foo {..} Bar;` では Foo が Bar の上に残る）
+        let mut own = None;
+        while let Some(&h) = stack.last() {
+            if h == i {
+                own = stack.pop();
+            } else if defs[h].body.end < names[i].end {
+                stack.pop();
+            } else {
+                break;
+            }
         }
         out[i] = stack.last().map(|&h| labels[h].clone());
         stack.extend(own);

@@ -638,6 +638,13 @@ fn c_struct_in_declaration_keeps_its_own_range() {
 }
 
 #[test]
+fn c_typedef_name_is_not_its_own_container() {
+    let d = defs_of(Lang::C, "typedef struct Foo { int x; } Bar;\n");
+    let bar = d.iter().find(|d| d.name == "Bar").unwrap();
+    assert_eq!(bar.container, None);
+}
+
+#[test]
 fn lua_function_inside_table_field_keeps_its_own_range() {
     let src = "local T = { run = function()\n  function inner() end\nend }\n";
     let d = defs_of(Lang::Lua, src);
