@@ -309,3 +309,38 @@ fn shutdown_grace_ends_at_the_deadline() {
     let took = start.elapsed();
     assert!(took < Duration::from_millis(1300), "{took:?}");
 }
+
+#[test]
+fn answers_are_asked_again_until_two_agree() {
+    let (_d, root) = repo();
+    let got = ask(
+        &fake(&[("FAKE_MODE", "growing")]),
+        &root,
+        Method::References,
+    )
+    .unwrap();
+    assert_eq!(
+        got,
+        [loc(root.join("x.rs"), 1, 1), loc(root.join("x.rs"), 2, 1)]
+    );
+}
+
+#[test]
+fn answers_that_keep_changing_are_unsettled() {
+    let (_d, root) = repo();
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(3);
+    let got = query_with(
+        &fake(&[("FAKE_MODE", "changing")]),
+        &root,
+        Lang::Rust,
+        Path::new("x.rs"),
+        1,
+        1,
+        Method::References,
+        deadline,
+    );
+    assert_eq!(got, Err(LspError::Unsettled));
+    let took = start.elapsed();
+    assert!(took < Duration::from_millis(3500), "{took:?}");
+}

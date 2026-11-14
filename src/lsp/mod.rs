@@ -36,6 +36,8 @@ pub enum LspError {
     NotInstalled(String),
     StartFailed(String),
     Timeout,
+    /// 答えは来たが、続けて問うた答えが期限まで一致しなかった。
+    Unsettled,
     Unsupported(&'static str),
     Protocol(String),
 }
@@ -46,6 +48,7 @@ impl fmt::Display for LspError {
             LspError::NotInstalled(what) => write!(f, "{what}が見つかりません"),
             LspError::StartFailed(why) => write!(f, "起動できませんでした（{why}）"),
             LspError::Timeout => write!(f, "期限内に答えがありませんでした"),
+            LspError::Unsettled => write!(f, "答えが期限内に定まりませんでした"),
             LspError::Unsupported(what) => write!(f, "{what}は言語サーバーで調べられません"),
             LspError::Protocol(why) => write!(f, "応答を読めませんでした（{why}）"),
         }
@@ -157,6 +160,7 @@ mod tests {
                 "起動できませんでした（x）",
             ),
             (LspError::Timeout, "期限内に答えがありませんでした"),
+            (LspError::Unsettled, "答えが期限内に定まりませんでした"),
             (
                 LspError::Unsupported("Markdown"),
                 "Markdownは言語サーバーで調べられません",

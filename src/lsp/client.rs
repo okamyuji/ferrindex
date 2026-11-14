@@ -18,6 +18,8 @@ use super::{Location, LspError, Method, ServerSpec};
 use crate::lang::Lang;
 
 const POLL: Duration = Duration::from_millis(50);
+/// 答えが定まったかを確かめるため、同じ問いを送り直すまでの間隔。
+const RECHECK: Duration = Duration::from_secs(1);
 /// `exit` の後に自分で終わるのを待つ長さ。期限までの残りがこれより短ければ残りまで。
 const GRACE: Duration = Duration::from_secs(2);
 
@@ -50,12 +52,7 @@ pub fn query_with(
         server.settled(method, &at, deadline)
     });
     server.stop(deadline);
-    // csharp-ls などは同じ結果を呼ぶたびに違う順で返し、重複も含みうる。
-    result.map(|mut found| {
-        found.sort();
-        found.dedup();
-        found
-    })
+    result
 }
 
 fn start_failed(path: &Path, e: io::Error) -> LspError {
@@ -212,21 +209,48 @@ impl Server {
         self.notify("initialized", json!({}))
     }
 
-    /// 読み込み中に得た答えは捨て、読み込みが終わってから問い直す。
+    /// 読み込み中に得た答えは捨てる。多くのサーバーは読み込みの途中でも、そうと知らせずに
+    /// 少ない答えを返す（pyright、tsserver など）。同じ答えが続けて2回返るまで間を置いて問い直す。
     fn settled(
         &mut self,
         method: Method,
         at: &Value,
         deadline: Instant,
     ) -> Result<Vec<Location>, LspError> {
+        let mut last = None;
         loop {
             while self.loading {
                 self.pump(deadline)?;
             }
-            let got = self.locations(method, at.clone(), deadline)?;
-            if !self.loading {
+            let mut got = self.locations(method, at.clone(), deadline)?;
+            if self.loading {
+                continue;
+            }
+            // csharp-ls などは同じ結果を呼ぶたびに違う順で返し、重複も含みうる。
+            got.sort();
+            got.dedup();
+            if last.as_ref() == Some(&got) {
                 return Ok(got);
             }
+            last = Some(got);
+            self.idle(Instant::now() + RECHECK, deadline)?;
+        }
+    }
+
+    /// `until` まで通知と要求を処理しながら待つ。先に期限が来たら、答えが定まらなかったとする。
+    fn idle(&mut self, until: Instant, deadline: Instant) -> Result<(), LspError> {
+        let until = until.min(deadline);
+        loop {
+            match self.pump(until) {
+                Ok(_) => {}
+                Err(LspError::Timeout) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        if until == deadline {
+            Err(LspError::Unsettled)
+        } else {
+            Ok(())
         }
     }
 

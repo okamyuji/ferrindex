@@ -292,10 +292,10 @@ fn precise_uses_the_server_result() {
         ]
     );
     assert_eq!(o.err, "");
-    // 定義 `fn target` の名前の位置（2行4列）を 0 始まりで問う。
+    // 定義 `fn target` の名前の位置（2行4列）を 0 始まりで問い、同じ答えが2回続いたら受け入れる。
     assert_eq!(
         std::fs::read_to_string(&log).unwrap(),
-        "textDocument/references 1 3\n"
+        "textDocument/references 1 3\n".repeat(2)
     );
 }
 
@@ -362,11 +362,17 @@ fn precise_falls_back_when_the_server_fails() {
 fn precise_queries_every_definition_up_to_5() {
     let r = repo();
     let log = r.xdg.with_file_name("log");
-    let log_env = [("FAKE_REFS", "[]"), ("FAKE_LOG", log.to_str().unwrap())];
+    r.write("c.rs", C_SRC);
+    let log_env = [
+        ("FAKE_REFS", r#"[["c.rs", 1, 12]]"#),
+        ("FAKE_LOG", log.to_str().unwrap()),
+    ];
     r.write("d.rs", "\nfn target() {}\n");
     let o = precise(&r, &log_env, &["refs", "target", "--precise"]);
-    assert_eq!(o.code, 1, "{}", o.err);
-    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
+    assert_eq!(o.code, 0, "{}", o.err);
+    // 定義ごとに、同じ答えが2回続くまで問う。
+    let asked = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(asked.lines().count(), 4, "{asked}");
 
     std::fs::remove_file(&log).unwrap();
     for i in 0..4 {
@@ -374,7 +380,7 @@ fn precise_queries_every_definition_up_to_5() {
     }
     let o = precise(&r, &log_env, &["refs", "target", "--precise"]);
     assert!(!log.exists());
-    assert_eq!(o.lines().len(), 2);
+    assert_eq!(o.lines().len(), 3);
     assert_eq!(
         o.err,
         "ferrindex: targetの定義が6件あり、問い合わせる上限の5件を超えます。名前一致の結果です（未確定）\n"
@@ -442,4 +448,19 @@ fn precise_keeps_results_in_files_without_a_language() {
         &["refs", "target", "--precise"],
     );
     assert_eq!(o.lines(), ["notes.txt:1:5 ref\tsee target here"]);
+}
+
+#[test]
+fn precise_answer_that_never_settles_falls_back() {
+    let r = repo();
+    let o = precise(
+        &r,
+        &[("FAKE_MODE", "changing")],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.lines().len(), 2);
+    assert_eq!(
+        o.err,
+        "ferrindex: rust-analyzer: 答えが期限内に定まりませんでした。名前一致の結果です（未確定）\n"
+    );
 }

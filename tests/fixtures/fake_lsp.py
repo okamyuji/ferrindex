@@ -4,6 +4,8 @@
 #   garbage       ヘッダの無い行を出して黙る
 #   hang          何も答えない
 #   unsorted      references に重複を含む順不同の結果を返す
+#   growing       references の答えが問うたびに1件ずつ増え、2件で止まる
+#   changing      references の答えが問うたびに1件ずつ増え続ける
 #   loading       initialized で読み込み中（quiescent: false）を知らせ、最初の references に空で答えてから読み込み終わりを知らせる
 # FAKE_PID_FILE があれば自分の pid を書く。FAKE_EXIT_FILE があれば shutdown の後の exit で書く。
 # FAKE_FAIL に method 名があれば、その要求にエラーで答える。
@@ -89,6 +91,7 @@ seen_ids = set()
 opened = set()
 shut = False
 loaded = mode != "loading"
+asked = 0
 while True:
     m = recv()
     method = m.get("method")
@@ -133,6 +136,11 @@ while True:
         if os.environ.get("FAKE_REFS"):
             reply(m, [{"uri": p if p.startswith("file:") else root + "/" + p, "range": rng(line, ch)}
                       for p, line, ch in json.loads(os.environ["FAKE_REFS"])])
+            continue
+        asked += 1
+        if mode in ("growing", "changing"):
+            n = asked - 1 if mode == "changing" else min(asked - 1, 2)
+            reply(m, [{"uri": root + "/x.rs", "range": rng(i, 0)} for i in range(n)])
             continue
         if mode == "needs_answers":
             wait_for_answers()
