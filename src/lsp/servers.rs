@@ -2,13 +2,14 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::iter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::LspError;
 use crate::lang::Lang;
 
 const BREW_JDK: &str = "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home";
+const JAVA_HOME_TOOL: &str = "/usr/libexec/java_home";
 const DOTNET_ROOTS: [&str; 2] = [
     "/opt/homebrew/opt/dotnet/libexec",
     "/usr/local/share/dotnet",
@@ -79,7 +80,7 @@ pub fn server_for(lang: Lang) -> Result<ServerSpec, LspError> {
         .map(PathBuf::from)
         .into_iter()
         .chain([PathBuf::from(BREW_JDK)])
-        .chain(iter::once_with(java_home_tool).flatten());
+        .chain(iter::once_with(|| java_home_from(Path::new(JAVA_HOME_TOOL))).flatten());
     let dotnet_roots = env::var_os("DOTNET_ROOT")
         .map(PathBuf::from)
         .into_iter()
@@ -87,8 +88,8 @@ pub fn server_for(lang: Lang) -> Result<ServerSpec, LspError> {
     spec_in(lang, &dirs, java_homes, dotnet_roots)
 }
 
-fn java_home_tool() -> Option<PathBuf> {
-    let out = Command::new("/usr/libexec/java_home")
+fn java_home_from(tool: &Path) -> Option<PathBuf> {
+    let out = Command::new(tool)
         .args(["-v", &format!("{MIN_JDK}+")])
         .output()
         .ok()
@@ -159,8 +160,29 @@ fn java_major(release: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
+
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let p = dir.join(name);
+        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[test]
+    fn java_home_tool_is_asked_for_25_or_later() {
+        let t = TempDir::new().unwrap();
+        let found = script(
+            t.path(),
+            "ok",
+            r#"[ "$1 $2" = "-v 25+" ] && echo /jdk/home || exit 1"#,
+        );
+        assert_eq!(java_home_from(&found), Some(PathBuf::from("/jdk/home")));
+        let none = script(t.path(), "none", "echo /jdk/home; exit 1");
+        assert_eq!(java_home_from(&none), None);
+        assert_eq!(java_home_from(&t.path().join("missing")), None);
+    }
 
     #[test]
     fn every_language_but_markdown_has_a_command() {
