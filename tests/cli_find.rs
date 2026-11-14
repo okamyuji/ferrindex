@@ -171,3 +171,48 @@ fn outline_of_a_file_with_no_definitions_is_exit_1() {
     r.write("e.rs", "// nothing\n");
     assert_eq!(r.run(&["outline", "e.rs"]).code, 1);
 }
+
+/// 塞がった入力で永遠に待たないよう、期限を過ぎたら子を殺して失敗にする。
+fn outline_with_deadline(cwd: &std::path::Path, arg: &str) -> Option<(i32, String)> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ferrindex"))
+        .args(["outline", arg])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let o = child.wait_with_output().unwrap();
+    Some((
+        o.status.code().unwrap(),
+        String::from_utf8(o.stderr).unwrap(),
+    ))
+}
+
+#[test]
+fn outline_rejects_non_regular_files_without_blocking() {
+    let t = tempfile::tempdir().unwrap();
+    let fifo = t.path().join("fifo.rs");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    std::fs::create_dir(t.path().join("dir.rs")).unwrap();
+    for name in ["fifo.rs", "dir.rs"] {
+        let (code, err) = outline_with_deadline(t.path(), name).expect("outline blocked");
+        assert_eq!(code, 4, "{name}: {err}");
+        assert_eq!(err.lines().count(), 1, "{err}");
+        assert!(err.contains("not a regular file"), "{err}");
+    }
+}

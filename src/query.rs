@@ -373,12 +373,22 @@ fn more(err: &mut impl Write, rest: usize) -> io::Result<()> {
     Ok(())
 }
 
+/// FIFO などを開くと書き手が現れるまで止まるので、読む前に通常ファイルだと確かめる。
+fn read_regular(file: &Path) -> Res<Vec<u8>> {
+    let io = |e: &dyn Display| Fail::io(format!("{}: {e}", file.display()));
+    let meta = fs::metadata(file).map_err(|e| io(&e))?;
+    if !meta.is_file() {
+        return Err(io(&"not a regular file"));
+    }
+    fs::read(file).map_err(|e| io(&e))
+}
+
 fn outline(file: &Path, out: &mut impl Write) -> Res {
     let lang = lang_of(file).ok_or_else(|| Fail {
         code: EXIT_NONE,
         msg: format!("ferrindex: unsupported file type: {}", file.display()),
     })?;
-    let src = fs::read(file).map_err(|e| Fail::io(format!("{}: {e}", file.display())))?;
+    let src = read_regular(file)?;
     let mut defs = extract(lang, &src);
     defs.sort_by_key(|d| (d.line, d.col));
     let path = file.as_os_str().as_bytes();
