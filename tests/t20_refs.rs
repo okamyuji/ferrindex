@@ -426,7 +426,8 @@ fn rust_supertraits_are_inherit_references_but_generic_bounds_are_not() {
     let src = "trait Base {}\n\
                trait Child: Base + a::Other + b::c::Deep<T> {}\n\
                fn g<T: Base>(t: T) where T: Base {}\n\
-               impl<T: Base> X for T {}\n";
+               impl<T: Base> X for T {}\n\
+               trait H: Fn(Req) -> Resp + a::FnMut() -> b::Out {}\n";
     let refs = refs_of(Lang::Rust, src.as_bytes());
     let inherit: Vec<(&str, u32, Option<&str>)> = refs
         .iter()
@@ -440,6 +441,8 @@ fn rust_supertraits_are_inherit_references_but_generic_bounds_are_not() {
             ("Other", 2, Some("Child")),
             ("Deep", 2, Some("Child")),
             ("X", 4, Some("T")),
+            ("Fn", 5, Some("H")),
+            ("FnMut", 5, Some("H")),
         ]
     );
 }

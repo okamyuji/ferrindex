@@ -216,6 +216,8 @@ const MEMBER_WORDS: [&str; 13] = [
 fn classify(ancestors: &[Step], leaf: Step) -> u8 {
     let mut below = leaf;
     let (mut depth, mut skipped) = (0, 0);
+    // `Fn(A) -> R` の境界で、`Fn` 以外（引数と戻り値の型）を通ったか
+    let mut fn_signature = false;
     for (i, a) in ancestors.iter().enumerate().rev() {
         if below.field == Some("receiver") {
             return REF_PLAIN;
@@ -245,7 +247,9 @@ fn classify(ancestors: &[Step], leaf: Step) -> u8 {
                 REF_CALL
             };
         }
-        let supertrait = a.kind == "trait_bounds"
+        fn_signature |= a.kind == "function_type" && below.field != Some("trait");
+        let supertrait = !fn_signature
+            && a.kind == "trait_bounds"
             && i.checked_sub(1)
                 .is_some_and(|p| ancestors[p].kind == "trait_item");
         if supertrait || INHERIT_WORDS.iter().any(|w| a.kind.contains(w)) {
