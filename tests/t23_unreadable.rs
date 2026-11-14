@@ -51,11 +51,12 @@ fn reading_commands_fail_with_the_path_of_an_unreadable_file() {
 fn precise_fails_when_an_answered_file_is_unreadable() {
     let r = Repo::new();
     r.write("a.rs", A_RS);
-    r.write("c.rs", "fn other() {\n    helper();\n}\n");
+    // 言語の決まらない .txt は名前一致の走査が読まない。名前一致に戻ればこの試験は通らない。
+    r.write("c.txt", "helper();\n");
     r.age();
     assert_eq!(r.run(&["update"]).code, 0);
     r.trust();
-    fs::set_permissions(r.root.join("c.rs"), fs::Permissions::from_mode(0o000)).unwrap();
+    fs::set_permissions(r.root.join("c.txt"), fs::Permissions::from_mode(0o000)).unwrap();
     let server = format!(
         "python3 -I {}/tests/fixtures/fake_lsp.py",
         env!("CARGO_MANIFEST_DIR")
@@ -63,12 +64,12 @@ fn precise_fails_when_an_answered_file_is_unreadable() {
     let o = r.run_with(
         &[
             ("FERRINDEX_LSP_RUST", &server),
-            ("FAKE_REFS", r#"[["a.rs", 2, 4], ["c.rs", 1, 4]]"#),
+            ("FAKE_REFS", r#"[["a.rs", 2, 4], ["c.txt", 0, 0]]"#),
         ],
         &["refs", "helper", "--precise"],
     );
     assert_eq!(o.code, 4, "{}", o.err);
-    assert!(o.err.starts_with("ferrindex: c.rs: "), "{}", o.err);
+    assert!(o.err.starts_with("ferrindex: c.txt: "), "{}", o.err);
 }
 
 #[test]
