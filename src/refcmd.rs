@@ -70,12 +70,8 @@ pub(crate) fn run(
         err.write_all(&found_err)?;
         return Ok(found);
     }
-    let why = match precise_lines(ctx, view, kind, term)? {
-        Ok(mut lines) if !lines.is_empty() => {
-            let total = lines.len();
-            lines.truncate(limit);
-            return emit(out, err, &lines, total);
-        }
+    let why = match precise_lines(ctx, view, kind, term, limit)? {
+        Ok((lines, total)) if total > 0 => return emit(out, err, &lines, total),
         // 読み込み途中のサーバーは0件と答えうるので、0件は確定とみなさない。
         Ok(_) => "言語サーバーの答えが0件でした".to_string(),
         // 理由にはサーバーが出した文字列が入りうるので、端末の制御文字を置き換える。
@@ -183,13 +179,18 @@ const PRECISE_MAX_DEFS: usize = 5;
 /// 定義が複数でも、すべての問い合わせを合わせた待ちの上限。
 const PRECISE_WAIT: Duration = Duration::from_secs(30);
 
-/// 言語サーバーの答えを出力の行にする。調べられなければ理由を返す（呼び手は名前一致に戻る）。
+/// 表示する行と、表示できる答えの総数。
+type Shown = (Vec<Vec<u8>>, usize);
+
+/// 言語サーバーの答えのうち `limit` 件を出力の行にし、表示できる答えの総数を添える。
+/// 調べられなければ理由を返す（呼び手は名前一致に戻る）。
 fn precise_lines(
     ctx: &Ctx,
     view: &View,
     kind: RefKind,
     term: &str,
-) -> Res<Result<Vec<Vec<u8>>, String>> {
+    limit: usize,
+) -> Res<Result<Shown, String>> {
     if !trust::is_trusted(&ctx.root)? {
         return Ok(Err(
             "このリポジトリは信頼されていません。`ferrindex trust` を端末で実行すると使えます"
@@ -294,7 +295,7 @@ fn precise_lines(
         RefKind::Callers => REF_CALL,
         RefKind::Impls | RefKind::Supers => REF_INHERIT,
     };
-    Ok(Ok(located(ctx, &root, &found, plain)?))
+    Ok(Ok(located(ctx, &root, &found, plain, limit)?))
 }
 
 /// 型の定義の（パス、名前）。
@@ -427,10 +428,11 @@ fn misses_a_call(
 }
 
 /// 位置ごとにファイルを抽出し直し、その位置の参照の種類と、囲む最も内側の定義を添える。
-/// 作業ツリーの外の位置（依存ライブラリなど）は出さない。
-fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8) -> Res<Vec<Vec<u8>>> {
+/// 作業ツリーの外の位置（依存ライブラリなど）と読めない位置は出さない。`limit` 件を超えた分は
+/// 整形せずに数える。整形は位置ごとにファイルを先頭から数え、ソース行を写すので重い。
+fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8, limit: usize) -> Res<Shown> {
     let mut parsed: HashMap<PathBuf, Option<Parsed>> = HashMap::new();
-    let mut lines = Vec::new();
+    let (mut lines, mut total) = (Vec::new(), 0);
     for loc in found {
         let Ok(rel) = loc.path.strip_prefix(root) else {
             continue;
@@ -442,6 +444,10 @@ fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8) -> Res<Vec<Vec
         else {
             continue;
         };
+        total += 1;
+        if lines.len() == limit {
+            continue;
+        }
         let at = (loc.line, loc.col);
         let kind = refs
             .iter()
@@ -463,7 +469,7 @@ fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8) -> Res<Vec<Vec
         };
         lines.push(render(ctx, &hit, Some(src)));
     }
-    Ok(lines)
+    Ok((lines, total))
 }
 
 /// ファイルの内容と、抽出し直した定義と参照。

@@ -1049,6 +1049,58 @@ fn refs_beyond_the_limit_are_counted_without_rendering() {
     assert!(large < small * 8, "{small:?} -> {large:?}");
 }
 
+/// 言語サーバーの答えも、上限を超えた分は整形せずに数える。答えは長い1行に並ぶので、全件を
+/// 整形すると答えの数と行の長さの積で伸びる。サーバーとのやり取りには答えの数によらない
+/// 待ち（答えを確かめる問い直し）があるので、小さい側でも整形の重さがそれを上回る数にする。
+#[test]
+fn precise_answers_beyond_the_limit_are_counted_without_rendering() {
+    // 答えの間隔。答えの数と行の長さをともに伸ばす
+    const STEP: usize = 25;
+    let time = |n: usize| {
+        let r = Repo::new();
+        let calls = format!("x();{}", " ".repeat(STEP - 4)).repeat(n);
+        r.write("a.rs", &format!("fn x() {{}}\nfn y() {{ {calls}}}\n"));
+        assert_eq!(r.run(&["update"]).code, 0);
+        let answers = format!("a.rs 1 9 {STEP} {n}");
+        let start = std::time::Instant::now();
+        let o = precise(
+            &r,
+            &[("FAKE_REFS_RUN", &answers)],
+            &["refs", "x", "--precise", "--limit", "1"],
+        );
+        let took = start.elapsed();
+        assert_eq!(o.lines().len(), 1, "{}", o.err);
+        assert!(o.out.starts_with("a.rs:2:10 call in y\tfn y() { x();"));
+        // 名前一致に戻ると、この行の代わりに理由の行が出る
+        assert_eq!(o.err, format!("… {} more\n", n - 1));
+        took
+    };
+    time(1000);
+    // 機械の負荷の揺れで偽の失敗を出さないよう、3回の最小値で比べる
+    let best = |n| (0..3).map(|_| time(n)).min().unwrap();
+    let small = best(3000);
+    let large = best(12000);
+    // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
+    assert!(large < small * 8, "{small:?} -> {large:?}");
+}
+
+/// 上限の前後にある読めない答えは、表示の行にも `… N more` の N にも入らない。
+#[test]
+fn precise_more_counts_only_the_answers_that_can_be_shown() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    let o = precise(
+        &r,
+        &[(
+            "FAKE_REFS",
+            r#"[["0gone.rs", 0, 0], ["a.rs", 3, 4], ["c.rs", 1, 12], ["zgone.rs", 0, 0]]"#,
+        )],
+        &["refs", "target", "--precise", "--limit", "1"],
+    );
+    assert_eq!(o.lines(), ["a.rs:4:5 call in caller_fn\ttarget();"]);
+    assert_eq!(o.err, "… 1 more\n");
+}
+
 /// 同名の型が1ファイルに大量にあっても、supers は定義ごとに全参照を走査しない。
 #[test]
 fn supers_of_many_same_named_types_take_linear_time() {

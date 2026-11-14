@@ -11,6 +11,8 @@
 # FAKE_FAIL に method 名があれば、その要求にエラーで答える。
 # FAKE_REFS は references、implementation、supertypes の答え（[[パス, 0始まりの行, 0始まりの列], ...] の JSON）。相対パスは根からの相対。
 # references では {"問うた行 列": [...]} の形で、問うた位置ごとに答えを変えられる。
+# FAKE_REFS_RUN は references の答えを「パス 0始まりの行 最初の列 列の間隔 件数」で並べる。
+# 1つの環境変数に入りきらない数の答えを返すときに使う。
 # FAKE_LOG があれば、位置を問う要求ごとに「method 行 列」を1行足す。
 import json
 import os
@@ -134,6 +136,11 @@ while True:
             with open(os.environ["FAKE_LOG"], "a") as f:
                 pos = params["position"]
                 f.write("%s %d %d\n" % (method, pos["line"], pos["character"]))
+        if os.environ.get("FAKE_REFS_RUN"):
+            p, line, ch, step, n = os.environ["FAKE_REFS_RUN"].split()
+            reply(m, [{"uri": root + "/" + p, "range": rng(int(line), int(ch) + i * int(step))}
+                      for i in range(int(n))])
+            continue
         if os.environ.get("FAKE_REFS"):
             refs = json.loads(os.environ["FAKE_REFS"])
             if isinstance(refs, dict):
