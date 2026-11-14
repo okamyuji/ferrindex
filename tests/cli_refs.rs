@@ -390,6 +390,7 @@ fn precise_queries_every_definition_up_to_5() {
 #[test]
 fn precise_with_five_definitions_asks_the_server() {
     let r = repo();
+    r.write("c.rs", C_SRC);
     for i in 0..4 {
         r.write(&format!("e{i}.rs"), "fn target() {}\n");
     }
@@ -448,6 +449,27 @@ fn precise_keeps_results_in_files_without_a_language() {
         &["refs", "target", "--precise"],
     );
     assert_eq!(o.lines(), ["notes.txt:1:5 ref\tsee target here"]);
+}
+
+#[test]
+fn precise_empty_answer_falls_back() {
+    let r = repo();
+    let o = precise(&r, &[("FAKE_REFS", "[]")], &["refs", "target", "--precise"]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(o.lines().len(), 2);
+    assert_eq!(
+        o.err,
+        "ferrindex: 言語サーバーの答えが0件でした。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn precise_empty_answer_with_no_name_match_stays_empty() {
+    let r = repo();
+    r.write("e.rs", "fn lonely() {}\n");
+    let o = precise(&r, &[("FAKE_REFS", "[]")], &["refs", "lonely", "--precise"]);
+    assert_eq!(o.code, 1, "{}", o.err);
+    assert_eq!(o.err, "");
 }
 
 #[test]

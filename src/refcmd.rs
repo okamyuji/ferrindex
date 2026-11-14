@@ -58,16 +58,39 @@ pub(crate) fn run(
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> Res {
-    if precise {
-        match precise_lines(ctx, view, kind, term)? {
-            Ok(mut lines) => {
-                let total = lines.len();
-                lines.truncate(limit);
-                return emit(out, err, &lines, total);
-            }
-            Err(why) => writeln!(err, "ferrindex: {why}。名前一致の結果です（未確定）")?,
-        }
+    if !precise {
+        return name_match(ctx, view, kind, term, limit, out, err);
     }
+    let why = match precise_lines(ctx, view, kind, term)? {
+        Ok(mut lines) if !lines.is_empty() => {
+            let total = lines.len();
+            lines.truncate(limit);
+            return emit(out, err, &lines, total);
+        }
+        // 読み込み途中のサーバーは0件と答えうるので、0件は確定とみなさない。
+        Ok(_) => "言語サーバーの答えが0件でした".to_string(),
+        Err(why) => why,
+    };
+    // 名前一致も空なら、戻ったと告げても意味が無いので理由は出さない。
+    let (mut found_out, mut found_err) = (Vec::new(), Vec::new());
+    let found = name_match(ctx, view, kind, term, limit, &mut found_out, &mut found_err)?;
+    if found {
+        writeln!(err, "ferrindex: {why}。名前一致の結果です（未確定）")?;
+    }
+    err.write_all(&found_err)?;
+    out.write_all(&found_out)?;
+    Ok(found)
+}
+
+fn name_match(
+    ctx: &Ctx,
+    view: &View,
+    kind: RefKind,
+    term: &str,
+    limit: usize,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Res {
     let name = last_segment(term);
     match kind {
         RefKind::Callers => indexed(ctx, view, &name, REF_CALL, limit, out, err),
