@@ -677,3 +677,22 @@ fn turbofish_nesting_is_counted_only_up_to_a_bound() {
     assert_eq!(kind(15), REF_CALL);
     assert_eq!(kind(16), REF_PLAIN);
 }
+
+/// 閉じない `::<` が並んでも線形に終わる。閉じない `::<` が現れるたびに前の走査の入れ子が
+/// 深くなり、入れ子の上限で止まるので、同時に長く続く走査は上限の数を超えない。
+#[test]
+fn unclosed_turbofish_scans_take_linear_time() {
+    let time = |n: usize| {
+        let src = format!("fn f() {{ m!({}); }}\n", "a::<x, c<d>, ".repeat(n));
+        let start = std::time::Instant::now();
+        refs_of(Lang::Rust, src.as_bytes());
+        start.elapsed()
+    };
+    time(500);
+    // 機械の負荷の揺れで偽の失敗を出さないよう、3回の最小値で比べる
+    let best = |n| (0..3).map(|_| time(n)).min().unwrap();
+    let small = best(2000);
+    let large = best(8000);
+    // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
+    assert!(large < small * 8, "{small:?} -> {large:?}");
+}
