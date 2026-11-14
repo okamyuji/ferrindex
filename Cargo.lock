@@ -107,6 +107,7 @@ dependencies = [
  "fst",
  "ignore",
  "memmap2",
+ "serde_json",
  "tempfile",
  "tree-sitter",
  "tree-sitter-c",

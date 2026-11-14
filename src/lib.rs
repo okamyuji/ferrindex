@@ -2,6 +2,7 @@ pub mod codec;
 mod describe;
 pub mod extract;
 pub mod fresh;
+pub mod hook;
 pub mod index;
 pub mod lang;
 mod markdown;

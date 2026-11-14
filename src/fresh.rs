@@ -16,7 +16,7 @@ use crate::store::{LockTimeout, cache_dir, with_lock};
 use crate::walk::{Scanned, scan};
 
 const LOCK_TIMEOUT: Duration = Duration::from_secs(20);
-const MAIN_FILE: &str = "main.fidx";
+pub(crate) const MAIN_FILE: &str = "main.fidx";
 const DELTA_FILE: &str = "delta.fidx";
 const MERGE_MAX_FILES: usize = 1_000;
 /// 差分区画が本体のファイル数のこの割合（1/MERGE_DIVISOR）を超えたら統合する。
