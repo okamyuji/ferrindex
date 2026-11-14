@@ -9,7 +9,7 @@ use std::{
     fs,
     io::Write,
     os::unix::ffi::OsStrExt,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -203,9 +203,12 @@ fn precise_lines(
             Err(e) => return Ok(Err(format!("{}: {e}", lsp::server_name(lang)))),
         }
     }
+    let root = canonical_root(ctx);
+    // `<根>/../x` も `strip_prefix` を通るので、`..` を含む位置は根の外として捨てる。
+    found.retain(|l| inside(&root, &l.path));
+    all.retain(|l| inside(&root, &l.path));
     found.sort();
     found.dedup();
-    let root = canonical_root(ctx);
     if checks_calls
         && !found.is_empty()
         && misses_a_call(view, &name, &root, &all).map_err(|c| corrupt(c, ctx))?
@@ -325,6 +328,11 @@ fn bases(ctx: &Ctx, defs: &[Found]) -> Res<Vec<String>> {
         );
     }
     Ok(out)
+}
+
+fn inside(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .is_ok_and(|rel| !rel.components().any(|c| c == Component::ParentDir))
 }
 
 /// サーバーは正規化したパスで答える。
@@ -645,6 +653,15 @@ mod tests {
         // 行末より右の列は行末に寄せる。
         assert_eq!(byte_offset(src, 1, 9), 2);
         assert_eq!(byte_offset(src, 9, 1), src.len());
+    }
+
+    #[test]
+    fn inside_rejects_paths_that_leave_the_root() {
+        let root = Path::new("/r");
+        assert!(inside(root, Path::new("/r/a/b.rs")));
+        assert!(!inside(root, Path::new("/r/../x.rs")));
+        assert!(!inside(root, Path::new("/r/a/../../x.rs")));
+        assert!(!inside(root, Path::new("/other/x.rs")));
     }
 
     #[test]

@@ -445,6 +445,32 @@ fn results_outside_root_are_dropped() {
 }
 
 #[test]
+fn results_climbing_out_of_root_with_dot_dot_are_dropped() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    std::fs::write(
+        r.root.with_file_name("outside.rs"),
+        "fn x() { target(); }\n",
+    )
+    .unwrap();
+    for cmd in ["refs", "impls"] {
+        let o = precise(
+            &r,
+            &[(
+                "FAKE_REFS",
+                r#"[["../outside.rs", 0, 9], ["c.rs", 1, 12], ["a.rs", 3, 4]]"#,
+            )],
+            &[cmd, "target", "--precise"],
+        );
+        assert!(
+            o.lines().iter().all(|l| !l.contains("outside")),
+            "{cmd}: {:?}",
+            o.lines()
+        );
+    }
+}
+
+#[test]
 fn precise_belongs_to_the_reference_commands() {
     let r = repo();
     let o = r.run(&["find", "target", "--precise"]);
