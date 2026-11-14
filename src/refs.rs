@@ -245,6 +245,25 @@ const MEMBER_WORDS: [&str; 13] = [
     "method_index_expression",
 ];
 
+/// `below` が `a` の中で、外側の呼び出しの対象にならない位置か。添字の中身と、メンバー参照の
+/// 最後でない名前がそれに当たる。
+fn off_the_callee(a: Step, below: Step) -> bool {
+    is_index(a, below) || !below.last && MEMBER_WORDS.iter().any(|w| a.kind.contains(w))
+}
+
+/// `below` が添字 `a[i]` の `i` の側か。`index` と `subscript` のフィールドは添字にしか使われない。
+/// Lua の `field` は `a.b` にも使われるので種類で絞る。Ruby と Rust の添字はフィールドを持たず、
+/// Ruby は添字される側だけが `object`、Rust は添字が 2 つ目の最後の子。
+fn is_index(a: Step, below: Step) -> bool {
+    match (a.kind, below.field) {
+        (_, Some("index" | "subscript"))
+        | ("bracket_index_expression", Some("field"))
+        | ("element_reference", None) => true,
+        ("index_expression", None) => below.last,
+        _ => false,
+    }
+}
+
 /// 引数の中の識別子と `obj.method()` の `obj` は呼び出しではない。
 /// `argument` を通ったら打ち切り、メンバー参照では最後の名前だけを先へ進める。
 /// Ruby の `call` は receiver と method を子に持つので、`receiver` フィールドで受け手を見分ける。
@@ -278,7 +297,7 @@ fn classify(ancestors: &[Step], leaf: Step) -> u8 {
         if a.kind.contains("argument") {
             return REF_PLAIN;
         }
-        if !below.last && MEMBER_WORDS.iter().any(|w| a.kind.contains(w)) {
+        if off_the_callee(*a, below) {
             return REF_PLAIN;
         }
         if CALL_WORDS.iter().any(|w| a.kind.contains(w)) {

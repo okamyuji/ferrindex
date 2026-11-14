@@ -567,3 +567,78 @@ fn calls_inside_attributes_stay_plain() {
     assert!(found.iter().all(|(_, k)| *k == REF_PLAIN), "{found:?}");
     assert_eq!(found.len(), 3, "{found:?}");
 }
+
+fn kind_of(found: &[(String, u8)], name: &str) -> u8 {
+    let mut of = found.iter().filter(|(n, _)| n == name).map(|&(_, k)| k);
+    let kind = of.next().unwrap_or_else(|| panic!("{name}: {found:?}"));
+    assert_eq!(of.next(), None, "{name}: {found:?}");
+    kind
+}
+
+/// 添字の中身は呼び出しでも継承でもない。添字される側は外側の文脈で分類する。C++、C#、Swift の
+/// 添字は引数の並びとして解析されるので、もとから plain になる。
+#[test]
+fn subscript_indexes_are_plain() {
+    let cases = [
+        (Lang::JavaScript, "handlers[target]();\n", REF_CALL),
+        (Lang::TypeScript, "handlers[target]();\n", REF_CALL),
+        (Lang::Tsx, "handlers[target]();\n", REF_CALL),
+        (Lang::Python, "handlers[target]()\n", REF_CALL),
+        (
+            Lang::Go,
+            "package a\nfunc g() { handlers[target]() }\n",
+            REF_CALL,
+        ),
+        (Lang::Rust, "fn g() { handlers[target](); }\n", REF_CALL),
+        (Lang::C, "void g() { handlers[target](); }\n", REF_CALL),
+        (
+            Lang::Cpp,
+            "void g() { x = handlers[target](); }\n",
+            REF_CALL,
+        ),
+        (Lang::Dart, "void g() { handlers[target](); }\n", REF_CALL),
+        (Lang::Lua, "handlers[target]()\n", REF_CALL),
+        (
+            Lang::Java,
+            "class A { void g() { handlers[target].run(); } }\n",
+            REF_PLAIN,
+        ),
+        (
+            Lang::CSharp,
+            "class A { void g() { handlers[target](); } }\n",
+            REF_CALL,
+        ),
+        (Lang::Swift, "func g() { handlers[target]() }\n", REF_CALL),
+        (Lang::Ruby, "x = handlers[target]\n", REF_PLAIN),
+        // 添字の中のメンバー参照と括弧も、添字の一部
+        (Lang::JavaScript, "handlers[o.target]();\n", REF_CALL),
+        (Lang::Python, "handlers[(target)]()\n", REF_CALL),
+    ];
+    for (lang, src, outer) in cases {
+        let found = kinds(lang, src);
+        assert_eq!(kind_of(&found, "target"), REF_PLAIN, "{lang:?} {src}");
+        assert_eq!(kind_of(&found, "handlers"), outer, "{lang:?} {src}");
+    }
+}
+
+#[test]
+fn subscripted_base_classes_inherit_but_their_indexes_do_not() {
+    let cases = [
+        (Lang::Python, "class Child(Base[T]): pass\n"),
+        (Lang::JavaScript, "class Child extends Base[T] {}\n"),
+        (Lang::TypeScript, "class Child extends Base[T] {}\n"),
+        (Lang::Ruby, "class Child < Base[T]; end\n"),
+    ];
+    for (lang, src) in cases {
+        let found = kinds(lang, src);
+        assert_eq!(kind_of(&found, "Base"), REF_INHERIT, "{lang:?}");
+        assert_eq!(kind_of(&found, "T"), REF_PLAIN, "{lang:?}");
+    }
+}
+
+/// Lua の `a.b()` の `b` は `field` フィールドにあるが、添字ではない。
+#[test]
+fn lua_dot_fields_stay_calls() {
+    let found = kinds(Lang::Lua, "a.target()\n");
+    assert_eq!(kind_of(&found, "target"), REF_CALL);
+}
