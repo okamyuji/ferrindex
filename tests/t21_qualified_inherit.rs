@@ -96,3 +96,18 @@ fn typescript_qualified_bases_inherit_only_the_last_name() {
         ]
     );
 }
+
+#[test]
+fn rust_impl_for_a_reference_type_names_the_referent() {
+    let src = "struct S<T>(T);\nimpl Tr for &S<u8> {}\nimpl Tr for &mut S<u8> {}\nimpl Tr for (S<u8>, u8) {}\n";
+    let defs = extract(Lang::Rust, src.as_bytes());
+    let got: Vec<(u32, Option<String>)> = extract_refs(Lang::Rust, src.as_bytes(), &defs)
+        .into_iter()
+        .filter(|r| r.kind == REF_INHERIT)
+        .map(|r| (r.line, r.container))
+        .collect();
+    assert_eq!(
+        got,
+        [(2, Some("S".into())), (3, Some("S".into())), (4, None)]
+    );
+}

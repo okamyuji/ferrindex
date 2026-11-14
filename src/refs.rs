@@ -148,11 +148,11 @@ fn impl_type_name(item: Node, src: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `a::b::Tr<T>` の `Tr`。これ以外の型（タプルなど）は名前を持たない。
+/// `a::b::Tr<T>` や `&mut Tr` の `Tr`。これ以外の型（タプルなど）は名前を持たない。
 fn last_type_name(mut node: Node) -> Option<Node> {
     loop {
         node = match node.kind() {
-            "generic_type" => node.child_by_field_name("type")?,
+            "generic_type" | "reference_type" => node.child_by_field_name("type")?,
             "scoped_type_identifier" => node.child_by_field_name("name")?,
             "type_identifier" => return Some(node),
             _ => return None,
