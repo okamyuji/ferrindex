@@ -1,8 +1,9 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     ffi::{OsStr, OsString},
     fmt::Display,
     fs,
+    hash::Hash,
     io::{self, Write},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
@@ -241,6 +242,31 @@ impl Ctx {
     }
 }
 
+/// 根相対のファイルの中身。索引の後に消えたファイルは `None`。権限などで読めなければ、
+/// 黙って結果から落とさず、パスを添えた I/O エラー（終了コード 4）にする。
+pub(crate) fn read_rel(root: &Path, path: &[u8]) -> Res<Option<Vec<u8>>> {
+    match fs::read(root.join(OsStr::from_bytes(path))) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Fail::io(format!(
+            "{}: {e}",
+            String::from_utf8_lossy(&escape_control(path))
+        ))),
+    }
+}
+
+/// 失敗しうる `or_insert_with`。
+pub(crate) fn cached<K: Eq + Hash, V>(
+    map: &mut HashMap<K, V>,
+    key: K,
+    load: impl FnOnce() -> Res<V>,
+) -> Res<&mut V> {
+    Ok(match map.entry(key) {
+        Entry::Occupied(e) => e.into_mut(),
+        Entry::Vacant(e) => e.insert(load()?),
+    })
+}
+
 /// 出力は 1 行 1 件で端末にも出るので、パスや名前の改行、ESC などの制御文字は文字列に置き換える。
 pub(crate) fn escape_control(path: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(path.len());
@@ -309,7 +335,7 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
             let lines: Vec<Vec<u8>> = hits
                 .iter()
                 .take(shown)
-                .map(|f| {
+                .map(|f| -> Res<Vec<u8>> {
                     let mut l = def_line(
                         &ctx.display(&f.path),
                         f.line,
@@ -318,18 +344,16 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
                         f.container.as_deref(),
                         &f.name,
                     );
-                    if let Some(src) = texts
-                        .entry(&f.path)
-                        .or_insert_with(|| fs::read(ctx.root.join(OsStr::from_bytes(&f.path))).ok())
+                    if let Some(src) = cached(&mut texts, &f.path, || read_rel(&ctx.root, &f.path))?
                         .as_deref()
                         .and_then(|t| source_line(t, f.line))
                     {
                         l.push(b'\t');
                         l.extend(src);
                     }
-                    l
+                    Ok(l)
                 })
-                .collect();
+                .collect::<Res<_>>()?;
             emit(out, err, &lines, hits.len())
         }
         Cmd::Files(t) => {
@@ -529,7 +553,7 @@ fn show_one(ctx: &Ctx, f: &Found, out: &mut impl Write) -> Res<()> {
     let Some(lang) = lang_of(rel) else {
         return Ok(());
     };
-    let Ok(src) = fs::read(ctx.root.join(rel)) else {
+    let Some(src) = read_rel(&ctx.root, &f.path)? else {
         return Ok(());
     };
     let Some(def) = extract(lang, &src)
@@ -606,7 +630,7 @@ fn map_dir(ctx: &Ctx, dir: Option<&Path>) -> Res<Vec<u8>> {
     Ok(dir_prefix(rel))
 }
 
-/// `limit` は表示した件数で数える（バイナリや読めないファイルは数えない）。
+/// `limit` は表示した件数で数える（バイナリと消えたファイルは数えない）。
 fn map(
     ctx: &Ctx,
     dir: Option<&Path>,
@@ -629,7 +653,7 @@ fn map(
         }
         seen += 1;
         let rel = Path::new(OsStr::from_bytes(path));
-        let Ok(bytes) = fs::read(ctx.root.join(rel)) else {
+        let Some(bytes) = read_rel(&ctx.root, path)? else {
             continue;
         };
         if is_binary(&bytes) {
@@ -650,6 +674,30 @@ fn map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_rel_returns_none_only_for_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "x").unwrap();
+        assert_eq!(
+            read_rel(dir.path(), b"a.rs").ok().unwrap(),
+            Some(b"x".to_vec())
+        );
+        assert_eq!(read_rel(dir.path(), b"gone.rs").ok().unwrap(), None);
+        // ディレクトリは読めない（NotFound でない）ので、パスを添えた終了コード 4。
+        let e = read_rel(dir.path(), b"").err().unwrap();
+        assert_eq!(e.code, EXIT_IO);
+        assert!(e.msg.starts_with("ferrindex: : "), "{}", e.msg);
+    }
+
+    #[test]
+    fn cached_loads_once_and_passes_failures_through() {
+        let mut map = HashMap::new();
+        assert_eq!(*cached(&mut map, 1, || Ok(10)).ok().unwrap(), 10);
+        assert_eq!(*cached(&mut map, 1, || Ok(20)).ok().unwrap(), 10);
+        assert!(cached(&mut map, 2, || Err(Fail::io("x"))).is_err());
+        assert!(!map.contains_key(&2));
+    }
 
     #[test]
     fn broken_pipe_is_quiet_success_and_other_io_is_exit_4() {

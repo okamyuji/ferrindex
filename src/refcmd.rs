@@ -17,7 +17,9 @@ use crate::extract::{Def, extract};
 use crate::fresh::{Found, View, is_binary};
 use crate::lang::{Lang, kind_id, lang_of};
 use crate::lsp::{self, Location, Method};
-use crate::query::{Ctx, Res, corrupt, emit, escape_control, resolve, resolve_exact, source_line};
+use crate::query::{
+    Ctx, Res, cached, corrupt, emit, escape_control, read_rel, resolve, resolve_exact, source_line,
+};
 use crate::refs::{REF_CALL, REF_INHERIT, REF_PLAIN, Ref, extract_refs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,8 +215,8 @@ fn precise_lines(
         ));
     }
     if matches!(kind, RefKind::Impls | RefKind::Supers) && !found.is_empty() {
-        let types = types_at(ctx, &root, &found);
-        if misses_an_inherit(ctx, view, kind, term, &defs, &types).map_err(|c| corrupt(c, ctx))? {
+        let types = types_at(ctx, &root, &found)?;
+        if misses_an_inherit(ctx, view, kind, term, &defs, &types)? {
             return Ok(Err("言語サーバーが継承の一部を返していません".to_string()));
         }
         // 問うた型そのものを実装として返すサーバーがある。
@@ -236,21 +238,26 @@ fn precise_lines(
         RefKind::Callers => REF_CALL,
         RefKind::Impls | RefKind::Supers => REF_INHERIT,
     };
-    Ok(Ok(located(ctx, &root, &found, plain)))
+    Ok(Ok(located(ctx, &root, &found, plain)?))
 }
+
+/// 型の定義の（パス、名前）。
+type TypeAt = Option<(Vec<u8>, String)>;
 
 /// 各位置の型（その位置に名前のある定義、無ければ囲む最も内側の定義）の（パス、名前）。
 /// サーバーは型の名前の位置（Dart の analysis server）か、宣言の先頭を返す。
-fn types_at(ctx: &Ctx, root: &Path, found: &[Location]) -> Vec<Option<(Vec<u8>, String)>> {
+fn types_at(ctx: &Ctx, root: &Path, found: &[Location]) -> Res<Vec<TypeAt>> {
     let mut parsed: HashMap<&Path, Option<Parsed>> = HashMap::new();
     found
         .iter()
         .map(|loc| {
-            let rel = loc.path.strip_prefix(root).ok()?;
-            let (src, defs, _) = parsed
-                .entry(rel)
-                .or_insert_with(|| parse(ctx, rel))
-                .as_ref()?;
+            let Ok(rel) = loc.path.strip_prefix(root) else {
+                return Ok(None);
+            };
+            let Some((src, defs, _)) = cached(&mut parsed, rel, || parse(ctx, rel))?.as_ref()
+            else {
+                return Ok(None);
+            };
             let offset = byte_offset(src, loc.line, loc.col);
             let def = defs
                 .iter()
@@ -259,8 +266,8 @@ fn types_at(ctx: &Ctx, root: &Path, found: &[Location]) -> Vec<Option<(Vec<u8>, 
                     defs.iter()
                         .filter(|d| d.body.contains(&offset))
                         .min_by_key(|d| d.body.len())
-                })?;
-            Some((rel.as_os_str().as_bytes().to_vec(), def.name.clone()))
+                });
+            Ok(def.map(|def| (rel.as_os_str().as_bytes().to_vec(), def.name.clone())))
         })
         .collect()
 }
@@ -275,7 +282,7 @@ fn misses_an_inherit(
     term: &str,
     defs: &[Found],
     types: &[Option<(Vec<u8>, String)>],
-) -> Result<bool, crate::codec::Corrupt> {
+) -> Res<bool> {
     let answered: HashSet<(&[u8], &str)> = types
         .iter()
         .flatten()
@@ -283,12 +290,17 @@ fn misses_an_inherit(
         .collect();
     if kind == RefKind::Supers {
         let names: HashSet<&str> = answered.iter().map(|&(_, n)| n).collect();
-        return Ok(bases(ctx, defs).iter().any(|b| !names.contains(b.as_str())));
+        return Ok(bases(ctx, defs)?
+            .iter()
+            .any(|b| !names.contains(b.as_str())));
     }
     if last_segment(term) != term {
         return Ok(false);
     }
-    Ok(view.lookup_refs(term.as_bytes())?.iter().any(|f| {
+    let refs = view
+        .lookup_refs(term.as_bytes())
+        .map_err(|c| corrupt(c, ctx))?;
+    Ok(refs.iter().any(|f| {
         f.kind == REF_INHERIT
             && !f.container.as_ref().is_some_and(|c| {
                 answered.contains(&(&f.path[..], String::from_utf8_lossy(c).as_ref()))
@@ -297,10 +309,10 @@ fn misses_an_inherit(
 }
 
 /// 定義のファイルを抽出し直して求めた、各定義の基底の名前。
-fn bases(ctx: &Ctx, defs: &[Found]) -> Vec<String> {
+fn bases(ctx: &Ctx, defs: &[Found]) -> Res<Vec<String>> {
     let mut out = Vec::new();
     for d in defs {
-        let Some((_, _, refs)) = parse(ctx, Path::new(OsStr::from_bytes(&d.path))) else {
+        let Some((_, _, refs)) = parse(ctx, Path::new(OsStr::from_bytes(&d.path)))? else {
             continue;
         };
         out.extend(
@@ -312,7 +324,7 @@ fn bases(ctx: &Ctx, defs: &[Found]) -> Vec<String> {
                 .map(|r| r.name),
         );
     }
-    out
+    Ok(out)
 }
 
 /// サーバーは正規化したパスで答える。
@@ -343,14 +355,14 @@ fn misses_a_call(
 
 /// 位置ごとにファイルを抽出し直し、その位置の参照の種類と、囲む最も内側の定義を添える。
 /// 作業ツリーの外の位置（依存ライブラリなど）は出さない。
-fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8) -> Vec<Vec<u8>> {
+fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8) -> Res<Vec<Vec<u8>>> {
     let mut parsed: HashMap<&Path, Option<Parsed>> = HashMap::new();
     let mut lines = Vec::new();
     for loc in found {
         let Ok(rel) = loc.path.strip_prefix(root) else {
             continue;
         };
-        let Some((src, defs, refs)) = parsed.entry(rel).or_insert_with(|| parse(ctx, rel)) else {
+        let Some((src, defs, refs)) = cached(&mut parsed, rel, || parse(ctx, rel))? else {
             continue;
         };
         let at = (loc.line, loc.col);
@@ -374,21 +386,23 @@ fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8) -> Vec<Vec<u8>
         };
         lines.push(render(ctx, &hit, Some(src)));
     }
-    lines
+    Ok(lines)
 }
 
 /// ファイルの内容と、抽出し直した定義と参照。
 type Parsed = (Vec<u8>, Vec<Def>, Vec<Ref>);
 
 /// 言語の決まらないファイル（サーバーが返した設定ファイルなど）は、定義と参照を空にして行だけ出す。
-fn parse(ctx: &Ctx, rel: &Path) -> Option<Parsed> {
-    let src = read_text(ctx, rel.as_os_str().as_bytes())?;
+fn parse(ctx: &Ctx, rel: &Path) -> Res<Option<Parsed>> {
+    let Some(src) = read_rel(&ctx.root, rel.as_os_str().as_bytes())? else {
+        return Ok(None);
+    };
     let Some(lang) = lang_of(rel) else {
-        return Some((src, Vec::new(), Vec::new()));
+        return Ok(Some((src, Vec::new(), Vec::new())));
     };
     let defs = extract(lang, &src);
     let refs = extract_refs(lang, &src, &defs);
-    Some((src, defs, refs))
+    Ok(Some((src, defs, refs)))
 }
 
 /// 1 始まりの行と、1 始まりで UTF-16 単位の列を、バイト位置にする。
@@ -432,10 +446,6 @@ fn render(ctx: &Ctx, h: &Hit, src: Option<&[u8]>) -> Vec<u8> {
     l
 }
 
-fn read_text(ctx: &Ctx, path: &[u8]) -> Option<Vec<u8>> {
-    fs::read(ctx.root.join(OsStr::from_bytes(path))).ok()
-}
-
 fn indexed(
     ctx: &Ctx,
     view: &View,
@@ -454,9 +464,7 @@ fn indexed(
         .iter()
         .take(limit)
         .map(|f| {
-            let src = texts
-                .entry(&f.path)
-                .or_insert_with(|| read_text(ctx, &f.path));
+            let src = cached(&mut texts, &f.path, || read_rel(&ctx.root, &f.path))?;
             let hit = Hit {
                 path: f.path.clone(),
                 line: f.line,
@@ -464,9 +472,9 @@ fn indexed(
                 kind: f.kind,
                 container: f.container.clone(),
             };
-            render(ctx, &hit, src.as_deref())
+            Ok(render(ctx, &hit, src.as_deref()))
         })
-        .collect();
+        .collect::<Res<_>>()?;
     emit(out, err, &lines, found.len())
 }
 
@@ -487,7 +495,7 @@ fn supers(
         let Some(lang) = lang_of(Path::new(OsStr::from_bytes(&d.path))) else {
             continue;
         };
-        let Some(src) = read_text(ctx, &d.path) else {
+        let Some(src) = read_rel(&ctx.root, &d.path)? else {
             continue;
         };
         let file_defs = extract(lang, &src);
@@ -503,11 +511,14 @@ fn supers(
 }
 
 /// 名前のバイト列を含むテキストファイル。大きすぎるファイルは `view.files()` が既に除いている。
-fn candidate(ctx: &Ctx, path: &[u8], needle: &[u8]) -> Option<(Lang, Vec<u8>)> {
-    let rel = Path::new(OsStr::from_bytes(path));
-    let lang = lang_of(rel)?;
-    let src = read_text(ctx, path)?;
-    (!is_binary(&src) && contains(&src, needle)).then_some((lang, src))
+fn candidate(ctx: &Ctx, path: &[u8], needle: &[u8]) -> Res<Option<(Lang, Vec<u8>)>> {
+    let Some(lang) = lang_of(Path::new(OsStr::from_bytes(path))) else {
+        return Ok(None);
+    };
+    let Some(src) = read_rel(&ctx.root, path)? else {
+        return Ok(None);
+    };
+    Ok((!is_binary(&src) && contains(&src, needle)).then_some((lang, src)))
 }
 
 /// 1 スレッドあたりに一度に渡すファイル数。`limit` に届いた後に無駄に読む分の上限になる。
@@ -529,7 +540,7 @@ fn refs(
     let mut next = 0;
     while next < files.len() && lines.len() < limit {
         let end = files.len().min(next + threads * FILES_PER_THREAD);
-        lines.extend(scan_chunk(ctx, &files[next..end], name, threads));
+        lines.extend(scan_chunk(ctx, &files[next..end], name, threads)?);
         next = end;
     }
     // 読んだ塊の中の超過行は数えない。残りのファイルがあるとき、件数は下限にしかならない。
@@ -547,37 +558,40 @@ fn refs(
     Ok(found)
 }
 
-/// `files` の参照行を、経路順のまま返す。
-fn scan_chunk(ctx: &Ctx, files: &[Vec<u8>], name: &str, threads: usize) -> Vec<Vec<u8>> {
+/// `files` の参照行を、経路順のまま返す。読めないファイルがあれば、経路順で最初のものの失敗。
+fn scan_chunk(ctx: &Ctx, files: &[Vec<u8>], name: &str, threads: usize) -> Res<Vec<Vec<u8>>> {
     let per = files.len().div_ceil(threads).max(1);
     std::thread::scope(|s| {
         let handles: Vec<_> = files
             .chunks(per)
             .map(|part| {
                 s.spawn(move || {
-                    part.iter()
-                        .flat_map(|p| scan_file(ctx, p, name))
-                        .collect::<Vec<_>>()
+                    let mut lines = Vec::new();
+                    for p in part {
+                        lines.extend(scan_file(ctx, p, name)?);
+                    }
+                    Res::Ok(lines)
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("scan thread panicked"))
-            .collect()
+        let mut lines = Vec::new();
+        for h in handles {
+            lines.extend(h.join().expect("scan thread panicked")?);
+        }
+        Ok(lines)
     })
 }
 
-fn scan_file(ctx: &Ctx, path: &[u8], name: &str) -> Vec<Vec<u8>> {
-    let Some((lang, src)) = candidate(ctx, path, name.as_bytes()) else {
-        return Vec::new();
+fn scan_file(ctx: &Ctx, path: &[u8], name: &str) -> Res<Vec<Vec<u8>>> {
+    let Some((lang, src)) = candidate(ctx, path, name.as_bytes())? else {
+        return Ok(Vec::new());
     };
     let defs = extract(lang, &src);
-    extract_refs(lang, &src, &defs)
+    Ok(extract_refs(lang, &src, &defs)
         .iter()
         .filter(|r| r.name == name)
         .map(|r| render(ctx, &Hit::new(path, r), Some(&src)))
-        .collect()
+        .collect())
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
