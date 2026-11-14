@@ -220,7 +220,7 @@ impl Ctx {
     }
 }
 
-/// 出力は 1 行 1 件なので、パス中の改行などの制御文字は文字列に置き換える。
+/// 出力は 1 行 1 件で端末にも出るので、パスや名前の改行、ESC などの制御文字は文字列に置き換える。
 fn escape_control(path: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(path.len());
     for &b in path {
@@ -383,10 +383,10 @@ fn def_line(
     let mut l = path.to_vec();
     l.extend(format!(":{line}:{col} {} ", kind_name(kind)).bytes());
     if let Some(c) = container {
-        l.extend_from_slice(c);
+        l.extend(escape_control(c));
         l.push(b'.');
     }
-    l.extend_from_slice(name);
+    l.extend(escape_control(name));
     l
 }
 
@@ -491,10 +491,10 @@ fn show_one(ctx: &Ctx, f: &Found, out: &mut impl Write) -> Res<()> {
     let mut head = ctx.display(&f.path);
     head.extend(format!(":{first}-{last} {} ", kind_name(f.kind)).bytes());
     if let Some(c) = &f.container {
-        head.extend_from_slice(c);
+        head.extend(escape_control(c));
         head.push(b'.');
     }
-    head.extend_from_slice(&f.name);
+    head.extend(escape_control(f.name.as_slice()));
     out.write_all(&head)?;
     out.write_all(b"\n")?;
     for l in lines.iter().take(SHOW_MAX_LINES) {
@@ -572,12 +572,9 @@ fn map(
         let text = String::from_utf8_lossy(&bytes);
         let lang = lang_of(rel);
         out.write_all(&ctx.display(path))?;
-        writeln!(
-            out,
-            "  ~{}  {}",
-            tokens(text.chars().count(), lang),
-            description(&text, lang)
-        )?;
+        write!(out, "  ~{}  ", tokens(text.chars().count(), lang))?;
+        out.write_all(&escape_control(description(&text, lang).as_bytes()))?;
+        out.write_all(b"\n")?;
     }
     more(err, files.len().saturating_sub(limit))?;
     Ok(!files.is_empty())

@@ -95,3 +95,30 @@ fn show_markdown_section_runs_to_next_heading() {
     let run = r.run(&["show", "One"]);
     assert_eq!(run.lines(), ["d.md:1-3 section One", "# One", "alpha", ""]);
 }
+
+#[test]
+fn names_and_descriptions_never_print_raw_control_characters() {
+    let repo = Repo::new();
+    repo.write("a.md", "# Head\x1b[31mRED\x1b]0;PWNED\x07 end\n\nbody\n");
+    repo.write("b.rs", "// note\x1b[2J here\nfn plain() {}\n");
+    for args in [
+        &["find", "Head"][..],
+        &["outline", "a.md"],
+        &["show", "Head"],
+        &["map"],
+    ] {
+        let run = repo.run(args);
+        assert_eq!(run.code, 0, "{args:?}: {}", run.err);
+        // show の本文はファイルの中身なので、見出し行だけを調べる
+        let checked = if args[0] == "show" {
+            run.out.lines().next().unwrap_or("").to_string()
+        } else {
+            run.out.clone()
+        };
+        assert!(
+            !checked.contains('\x1b') && !checked.contains('\x07'),
+            "{args:?}: {checked:?}"
+        );
+        assert!(checked.contains("\\x1b"), "{args:?}: {checked:?}");
+    }
+}
