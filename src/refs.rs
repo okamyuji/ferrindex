@@ -134,13 +134,15 @@ struct Step<'a> {
     last: bool,
 }
 
-const MEMBER_WORDS: [&str; 7] = [
+const MEMBER_WORDS: [&str; 9] = [
     "member",
     "field_expression",
     "selector_expression",
     "navigation",
     "attribute",
     "scoped_identifier",
+    "scoped_type_identifier",
+    "scope_resolution",
     "qualified",
 ];
 

@@ -20,7 +20,7 @@ pub const LANG_BINARY: u8 = 255;
 
 const MAGIC: &[u8; 8] = b"FERRIDX\0";
 /// 抽出結果の意味が変わる変更（クエリ、kind の割り当て、行列の数え方）では必ず上げる。
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
 const SECTION_COUNT: usize = 7;
 /// 区画ごとに 長さ u64 と CRC32C u32。位置は長さの総和で決まる。
 const SECTION_ENTRY_LEN: usize = 12;
