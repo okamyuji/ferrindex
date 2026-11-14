@@ -29,7 +29,9 @@ ferrindex servers
 
 出力はタブ区切りで、1行目が見出しです。
 列は`language`、`files`、`server`、`installed`、`prerequisite`、`install`の順に並びます。
-終了コード3ならgitリポジトリの外なので、リポジトリの中で頼み直すよう伝えて終わります。
+終了コード3は索引が使えないことを示します。
+原因はgitリポジトリの外、索引のロック待ちの時間切れ、作り直しても開けない索引のどれかです。
+標準エラーに出た理由を利用者にそのまま伝えて終わります。
 終了コード1はコードのファイルが索引に無いことを示すので、入れるものが無いと伝えて終わります。
 
 ### 2. 候補を選ぶ
@@ -65,7 +67,7 @@ AskUserQuestionを`multiSelect: true`で使います。
 入れた後も`installed`が`no`のときは、実行ファイルがPATHに無いことがほとんどです。
 次の行を利用者に示します。
 
-- clangd Homebrewの`llvm`はPATHに載りません。`export PATH="/opt/homebrew/opt/llvm/bin:$PATH"`をシェルの設定に足すよう伝えます。
+- clangd Homebrewの`llvm`はPATHに載りません。`export PATH="$(brew --prefix llvm)/bin:$PATH"`をシェルの設定に足すよう伝えます。Homebrewの置き場所はApple SiliconとIntelで違うので、`brew --prefix`で求めます。
 - gopls `go install`は`$(go env GOPATH)/bin`に入れます。そのディレクトリをPATHに足すよう伝えます。
 - npmやgemで入れたもの そのパッケージ管理の`bin`ディレクトリがPATHにあるかを確かめるよう伝えます。
 
