@@ -197,12 +197,107 @@ fn precise_lines(
             "言語サーバーが取り込みや別名経由の呼び出しを返していません".to_string(),
         ));
     }
+    if matches!(kind, RefKind::Impls | RefKind::Supers) && !found.is_empty() {
+        let types = types_at(ctx, &root, &found);
+        if misses_an_inherit(ctx, view, kind, term, &defs, &types).map_err(|c| corrupt(c, ctx))? {
+            return Ok(Err("言語サーバーが継承の一部を返していません".to_string()));
+        }
+        // 問うた型そのものを実装として返すサーバーがある。
+        let queried: HashSet<(&[u8], &[u8])> =
+            defs.iter().map(|d| (&d.path[..], &d.name[..])).collect();
+        let is_queried = |t: &Option<(Vec<u8>, String)>| {
+            t.as_ref()
+                .is_some_and(|(p, n)| queried.contains(&(&p[..], n.as_bytes())))
+        };
+        found = found
+            .into_iter()
+            .zip(&types)
+            .filter(|(_, t)| kind == RefKind::Supers || !is_queried(t))
+            .map(|(l, _)| l)
+            .collect();
+    }
     let plain = match kind {
         RefKind::Refs => REF_PLAIN,
         RefKind::Callers => REF_CALL,
         RefKind::Impls | RefKind::Supers => REF_INHERIT,
     };
     Ok(Ok(located(ctx, &root, &found, plain)))
+}
+
+/// 各位置の型（その位置に名前のある定義、無ければ囲む最も内側の定義）の（パス、名前）。
+/// サーバーは型の名前の位置（Dart の analysis server）か、宣言の先頭を返す。
+fn types_at(ctx: &Ctx, root: &Path, found: &[Location]) -> Vec<Option<(Vec<u8>, String)>> {
+    let mut parsed: HashMap<&Path, Option<Parsed>> = HashMap::new();
+    found
+        .iter()
+        .map(|loc| {
+            let rel = loc.path.strip_prefix(root).ok()?;
+            let (src, defs, _) = parsed
+                .entry(rel)
+                .or_insert_with(|| parse(ctx, rel))
+                .as_ref()?;
+            let offset = byte_offset(src, loc.line, loc.col);
+            let def = defs
+                .iter()
+                .find(|d| (d.line, d.col) == (loc.line, loc.col))
+                .or_else(|| {
+                    defs.iter()
+                        .filter(|d| d.body.contains(&offset))
+                        .min_by_key(|d| d.body.len())
+                })?;
+            Some((rel.as_os_str().as_bytes().to_vec(), def.name.clone()))
+        })
+        .collect()
+}
+
+/// 名前一致の継承の行に、答えの型に無いものがあるか。impls は各行の（ファイル、囲む型）、
+/// supers は問うた型の各基底の名前で比べる。impls の修飾した名前は、継承の行がどの定義を
+/// 指すか名前では分からないので確かめない。
+fn misses_an_inherit(
+    ctx: &Ctx,
+    view: &View,
+    kind: RefKind,
+    term: &str,
+    defs: &[Found],
+    types: &[Option<(Vec<u8>, String)>],
+) -> Result<bool, crate::codec::Corrupt> {
+    let answered: HashSet<(&[u8], &str)> = types
+        .iter()
+        .flatten()
+        .map(|(p, n)| (&p[..], n.as_str()))
+        .collect();
+    if kind == RefKind::Supers {
+        let names: HashSet<&str> = answered.iter().map(|&(_, n)| n).collect();
+        return Ok(bases(ctx, defs).iter().any(|b| !names.contains(b.as_str())));
+    }
+    if last_segment(term) != term {
+        return Ok(false);
+    }
+    Ok(view.lookup_refs(term.as_bytes())?.iter().any(|f| {
+        f.kind == REF_INHERIT
+            && !f.container.as_ref().is_some_and(|c| {
+                answered.contains(&(&f.path[..], String::from_utf8_lossy(c).as_ref()))
+            })
+    }))
+}
+
+/// 定義のファイルを抽出し直して求めた、各定義の基底の名前。
+fn bases(ctx: &Ctx, defs: &[Found]) -> Vec<String> {
+    let mut out = Vec::new();
+    for d in defs {
+        let Some((_, _, refs)) = parse(ctx, Path::new(OsStr::from_bytes(&d.path))) else {
+            continue;
+        };
+        out.extend(
+            refs.into_iter()
+                .filter(|r| {
+                    r.kind == REF_INHERIT
+                        && r.container.as_deref().map(str::as_bytes) == Some(&d.name)
+                })
+                .map(|r| r.name),
+        );
+    }
+    out
 }
 
 /// サーバーは正規化したパスで答える。

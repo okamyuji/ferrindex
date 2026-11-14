@@ -647,3 +647,54 @@ fn go_precise_failure_shows_the_reason_not_the_hint() {
     );
     assert_eq!(o.lines().len(), 1, "{}", o.err);
 }
+
+fn precise_py(r: &Repo, answer: &str, args: &[&str]) -> common::Run {
+    let server = fake_server();
+    r.run_with(
+        &[
+            ("FERRINDEX_LSP_PYTHON", server.as_str()),
+            ("FAKE_REFS", answer),
+        ],
+        args,
+    )
+}
+
+#[test]
+fn impls_answer_must_cover_every_subclass() {
+    let r = repo();
+    r.write("c.py", "class C(A):\n    pass\n");
+    // 答えは B と、問うた A 自身。A は出さない。
+    let o = precise_py(
+        &r,
+        r#"[["b.py", 3, 6], ["c.py", 0, 6], ["b.py", 0, 6]]"#,
+        &["impls", "A", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(
+        o.lines(),
+        [
+            "b.py:4:7 inherit\tclass B(A):",
+            "c.py:1:7 inherit\tclass C(A):"
+        ]
+    );
+
+    let o = precise_py(&r, r#"[["b.py", 3, 6]]"#, &["impls", "A", "--precise"]);
+    assert_eq!(o.lines().len(), 2);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: 言語サーバーが継承の一部を返していません。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn supers_answer_must_cover_every_base() {
+    let r = repo();
+    r.write("x.py", "class Z:\n    pass\n");
+    let o = precise_py(&r, r#"[["b.py", 0, 6]]"#, &["supers", "B", "--precise"]);
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["b.py:1:7 inherit\tclass A:"]);
+
+    let o = precise_py(&r, r#"[["x.py", 0, 6]]"#, &["supers", "B", "--precise"]);
+    assert_eq!(o.lines(), ["b.py:4:9 inherit in B\tclass B(A):"]);
+    assert!(o.err.contains("継承の一部を返していません"), "{}", o.err);
+}

@@ -9,7 +9,7 @@
 #   loading       initialized で読み込み中（quiescent: false）を知らせ、最初の references に空で答えてから読み込み終わりを知らせる
 # FAKE_PID_FILE があれば自分の pid を書く。FAKE_EXIT_FILE があれば shutdown の後の exit で書く。
 # FAKE_FAIL に method 名があれば、その要求にエラーで答える。
-# FAKE_REFS は references の答え（[[パス, 0始まりの行, 0始まりの列], ...] の JSON）。相対パスは根からの相対。
+# FAKE_REFS は references、implementation、supertypes の答え（[[パス, 0始まりの行, 0始まりの列], ...] の JSON）。相対パスは根からの相対。
 # FAKE_LOG があれば、位置を問う要求ごとに「method 行 列」を1行足す。
 import json
 import os
@@ -157,6 +157,12 @@ while True:
         here = {"uri": params["textDocument"]["uri"],
                 "range": rng(params["position"]["line"], params["position"]["character"])}
         reply(m, [here, {"uri": root + "/src/a%20b.rs", "range": rng(9, 0)}])
+    elif method == "textDocument/implementation" and os.environ.get("FAKE_REFS"):
+        reply(m, [{"uri": p if p.startswith("file:") else root + "/" + p, "range": rng(line, ch)}
+                  for p, line, ch in json.loads(os.environ["FAKE_REFS"])])
+    elif method == "typeHierarchy/supertypes" and os.environ.get("FAKE_REFS"):
+        reply(m, [{"name": "S", "uri": root + "/" + p, "selectionRange": rng(line, ch)}
+                  for p, line, ch in json.loads(os.environ["FAKE_REFS"])])
     elif method == "textDocument/implementation":
         reply(m, [{"targetUri": root + "/impl.rs", "targetRange": rng(0, 0), "targetSelectionRange": rng(3, 5)}])
     elif method == "textDocument/prepareCallHierarchy":
