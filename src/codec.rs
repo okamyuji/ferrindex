@@ -70,7 +70,7 @@ pub fn encode_rows(out: &mut Vec<u8>, rows: &[Row]) {
             }
         };
         put_varint(out, u64::from(fd));
-        put_varint(out, u64::from(ld) << KIND_BITS | u64::from(r.kind));
+        put_varint(out, (u64::from(ld) << KIND_BITS) + u64::from(r.kind));
         put_varint(out, u64::from(r.col));
         put_varint(out, u64::from(r.container));
         prev = Some(r);
@@ -84,7 +84,7 @@ pub fn decode_rows(mut b: &[u8], max_file: u32, max_name: u32) -> Result<Vec<Row
     // 1 行は最低 4 バイト。n を信じて確保しない
     let mut rows = Vec::with_capacity((n as usize).min(b.len() / 4));
     let (mut file, mut line) = (0u32, 0u32);
-    for i in 0..n {
+    for _ in 0..n {
         let fd = u32::try_from(get_varint(b)?).map_err(|_| Corrupt)?;
         let packed = get_varint(b)?;
         let ld = u32::try_from(packed >> KIND_BITS).map_err(|_| Corrupt)?;
@@ -92,7 +92,7 @@ pub fn decode_rows(mut b: &[u8], max_file: u32, max_name: u32) -> Result<Vec<Row
         let col = u32::try_from(get_varint(b)?).map_err(|_| Corrupt)?;
         let container = u32::try_from(get_varint(b)?).map_err(|_| Corrupt)?;
         file = file.checked_add(fd).ok_or(Corrupt)?;
-        line = if i > 0 && fd == 0 {
+        line = if fd == 0 {
             line.checked_add(ld).ok_or(Corrupt)?
         } else {
             ld
@@ -233,5 +233,49 @@ mod tests {
         let f = fst_of(&[b"a", b"ab"]);
         assert_eq!(key_by_rank(&f, 2), None);
         assert_eq!(key_by_rank(&f, u64::MAX / 2), None);
+    }
+
+    #[test]
+    fn corrupt_displays_message() {
+        assert_eq!(Corrupt.to_string(), "corrupt index data");
+    }
+
+    #[test]
+    fn rows_pack_line_and_kind() {
+        let mut buf = Vec::new();
+        encode_rows(&mut buf, &[row(0, 3, 1, 5, 0)]);
+        // count, file, line<<4|kind, col, container
+        assert_eq!(buf, [1, 0, 3 << 4 | 5, 1, 0]);
+    }
+
+    #[test]
+    fn rows_bounds_are_exclusive_file_inclusive_container() {
+        let mut buf = Vec::new();
+        encode_rows(&mut buf, &[row(2, 1, 1, 0, 4)]);
+        assert!(decode_rows(&buf, 3, 4).is_ok());
+        assert_eq!(decode_rows(&buf, 3, 3), Err(Corrupt));
+        assert_eq!(decode_rows(&buf, 2, 4), Err(Corrupt));
+    }
+
+    #[test]
+    fn key_by_rank_with_nonzero_acc_at_final() {
+        // 共有接頭辞 "ab" の先で final 判定に acc が効く
+        let keys: [&[u8]; 4] = [b"ab", b"abc", b"abd", b"b"];
+        let f = fst_of(&keys);
+        for (i, k) in keys.iter().enumerate() {
+            assert_eq!(key_by_rank(&f, i as u64).as_deref(), Some(*k));
+        }
+        assert_eq!(key_by_rank(&f, 4), None);
+    }
+
+    #[test]
+    fn key_by_rank_adds_final_output() {
+        // "ab" の値が小さいと遷移 'a' の出力は 5 になり、"a" の final 出力は 2 になる
+        let mut b = MapBuilder::memory();
+        for (k, v) in [(&b"a"[..], 7u64), (b"ab", 5)] {
+            b.insert(k, v).unwrap();
+        }
+        let f = Fst::new(b.into_inner().unwrap()).unwrap();
+        assert_eq!(key_by_rank(&f, 7).as_deref(), Some(&b"a"[..]));
     }
 }
