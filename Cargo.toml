@@ -5,7 +5,9 @@ edition = "2024"
 rust-version = "1.100"
 
 [dependencies]
+crc32c = "0.6.9"
 fst = "0.4.7"
+memmap2 = "0.9.12"
 tree-sitter = "0.27.2"
 tree-sitter-c = "0.24.2"
 tree-sitter-c-sharp = "0.23.5"
@@ -24,3 +26,6 @@ tree-sitter-typescript = "0.23.2"
 
 [lints.cargo]
 unused_dependencies = "deny"
+
+[dev-dependencies]
+tempfile = "3.27.0"
