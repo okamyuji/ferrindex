@@ -6,6 +6,9 @@ set -euo pipefail
 
 BIN="$(cd "$(dirname "$0")/.." && pwd)/target/release/ferrindex"
 BENCH="${FERRINDEX_BENCH_DIR:-$HOME/.cache/ferrindex-bench}"
+# 相対パスのままだと、リポジトリへ cd した後の解決先がずれる
+mkdir -p "$BENCH"
+BENCH="$(cd "$BENCH" && pwd)"
 # 利用者の本物の索引キャッシュに触れない
 export XDG_CACHE_HOME="$BENCH/cache"
 
