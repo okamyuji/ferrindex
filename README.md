@@ -55,6 +55,7 @@ cargo install --path .
 - `ferrindex impls <name> [--limit N] [--precise]`名前の型を継承、実装している位置を一覧します。
 - `ferrindex supers <name> [--limit N] [--precise]`名前の型が継承、実装している型を一覧します。
 - `ferrindex trust`と`ferrindex untrust`は、カレントディレクトリのリポジトリを`--precise`に使ってよいかを切り替えます。
+- `ferrindex servers`は、索引にある言語ごとに、`--precise`が使う言語サーバーの導入状況を1行ずつ出します。
 
 参照の4コマンドは各行に参照の種類（`call`、`inherit`、`ref`）と、参照を囲む最も内側の定義を`in <定義>`の形で付けます。
 
@@ -167,6 +168,32 @@ ferrindexが起動するサーバーは次のとおりです。
 | Dart | dart language-server | |
 
 サーバーはPATHと`~/.dotnet/tools`から探します。
+
+### 言語サーバーの導入状況
+
+`ferrindex servers`はタブ区切りで出力します。
+1行目は見出しで、2行目から索引にある言語が1行ずつ続きます。
+
+| 列 | 内容 |
+|---|---|
+| `language` | 言語の名前（`rust`、`typescript`、`cpp`など） |
+| `files` | 索引にあるその言語のファイル数 |
+| `server` | 使う言語サーバー |
+| `installed` | サーバーが見つかれば`yes`、無ければ`no` |
+| `prerequisite` | 前提が揃えば`ok`、揃わなければ足りないもの |
+| `install` | macOSでサーバーを入れるコマンド |
+
+`prerequisite`で確かめる前提は次のとおりです。
+jdtlsはJDK 25以上、csharp-lsは`DOTNET_ROOT`か既定の場所にある.NET SDK、clangdはリポジトリの根の`compile_commands.json`を要ります。
+Markdownにはサーバーが無いので出しません。
+コードのファイルが無ければ見出しだけを出し、終了コード1で終わります。gitリポジトリの外では終了コード3です。
+
+```text
+$ ferrindex servers
+language	files	server	installed	prerequisite	install
+rust	2	rust-analyzer	yes	ok	rustup component add rust-analyzer
+c	1	clangd	no	compile_commands.json	brew install llvm
+```
 
 ### 作業ツリーに作られるもの
 

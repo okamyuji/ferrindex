@@ -87,21 +87,85 @@ pub(super) fn language_id(lang: Lang) -> &'static str {
 }
 
 pub fn server_for(lang: Lang) -> Result<ServerSpec, LspError> {
+    spec_in(lang, &search_dirs(), java_homes(), dotnet_roots())
+}
+
+fn search_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = env::var_os("PATH")
         .map(|p| env::split_paths(&p).collect())
         .unwrap_or_default();
     // `dotnet tool install -g` は PATH に載らないことが多い。
     dirs.extend(env::home_dir().map(|h| h.join(".dotnet/tools")));
-    let java_homes = env::var_os("FERRINDEX_JAVA_HOME")
+    dirs
+}
+
+fn java_homes() -> impl Iterator<Item = PathBuf> {
+    env::var_os("FERRINDEX_JAVA_HOME")
         .map(PathBuf::from)
         .into_iter()
         .chain([PathBuf::from(BREW_JDK)])
-        .chain(iter::once_with(|| java_home_from(Path::new(JAVA_HOME_TOOL))).flatten());
-    let dotnet_roots = env::var_os("DOTNET_ROOT")
+        .chain(iter::once_with(|| java_home_from(Path::new(JAVA_HOME_TOOL))).flatten())
+}
+
+fn dotnet_roots() -> impl Iterator<Item = PathBuf> {
+    env::var_os("DOTNET_ROOT")
         .map(PathBuf::from)
         .into_iter()
-        .chain(DOTNET_ROOTS.map(PathBuf::from));
-    spec_in(lang, &dirs, java_homes, dotnet_roots)
+        .chain(DOTNET_ROOTS.map(PathBuf::from))
+}
+
+/// `ferrindex servers` の 1 行分。`missing` は揃っていない前提。
+pub struct Setup {
+    pub installed: bool,
+    pub missing: Option<String>,
+}
+
+/// 言語サーバーが入っているかと、起動に要る前提（JDK、.NET SDK、compile_commands.json）が揃っているか。
+pub fn setup(lang: Lang, root: &Path) -> Setup {
+    setup_in(lang, root, &search_dirs(), java_homes(), dotnet_roots())
+}
+
+fn setup_in(
+    lang: Lang,
+    root: &Path,
+    dirs: &[PathBuf],
+    java_homes: impl IntoIterator<Item = PathBuf>,
+    dotnet_roots: impl IntoIterator<Item = PathBuf>,
+) -> Setup {
+    let installed =
+        command_of(lang).is_some_and(|(name, _)| dirs.iter().any(|d| d.join(name).is_file()));
+    let missing = match lang {
+        Lang::Java => pick_java_home(java_homes)
+            .is_none()
+            .then(|| format!("JDK {MIN_JDK}以上")),
+        Lang::CSharp => (!dotnet_roots.into_iter().any(|p| p.is_dir()))
+            .then(|| ".NET SDK（DOTNET_ROOT）".to_string()),
+        Lang::C | Lang::Cpp => (!root.join("compile_commands.json").is_file())
+            .then(|| "compile_commands.json".to_string()),
+        _ => None,
+    };
+    Setup { installed, missing }
+}
+
+/// macOS で言語サーバーを入れるコマンド。typescript-language-server は tsserver を同梱しない
+/// TypeScript 7 では動かないので、TypeScript は 6 系を入れる。
+pub fn install_command(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Rust => "rustup component add rust-analyzer",
+        Lang::Go => "go install golang.org/x/tools/gopls@latest",
+        Lang::Python => "npm install -g pyright",
+        Lang::TypeScript | Lang::Tsx | Lang::JavaScript => {
+            "npm install -g typescript-language-server typescript@6"
+        }
+        Lang::Java => "brew install jdtls openjdk",
+        Lang::CSharp => "brew install dotnet && dotnet tool install -g csharp-ls",
+        Lang::Ruby => "gem install solargraph",
+        Lang::C | Lang::Cpp => "brew install llvm",
+        Lang::Swift => "xcode-select --install",
+        Lang::Lua => "brew install lua-language-server",
+        Lang::Dart => "brew install dart-lang/dart/dart",
+        Lang::Markdown => "",
+    }
 }
 
 fn java_home_from(tool: &Path) -> Option<PathBuf> {
@@ -178,6 +242,61 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
+
+    #[test]
+    fn setup_reports_the_server_and_each_prerequisite() {
+        let t = TempDir::new().unwrap();
+        let bin = t.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("jdtls"), "").unwrap();
+        let dirs = [t.path().join("none"), bin];
+        let none = || Vec::<PathBuf>::new();
+        let java = setup_in(Lang::Java, t.path(), &dirs, none(), none());
+        assert!(java.installed);
+        assert_eq!(java.missing.as_deref(), Some("JDK 25以上"));
+        let jdk = t.path().join("jdk");
+        fs::create_dir_all(&jdk).unwrap();
+        fs::write(jdk.join("release"), "JAVA_VERSION=\"25.0.1\"\n").unwrap();
+        assert_eq!(
+            setup_in(Lang::Java, t.path(), &dirs, [jdk], none()).missing,
+            None
+        );
+        let cs = setup_in(Lang::CSharp, t.path(), &dirs, none(), [t.path().join("no")]);
+        assert!(!cs.installed);
+        assert_eq!(cs.missing.as_deref(), Some(".NET SDK（DOTNET_ROOT）"));
+        let cs = setup_in(
+            Lang::CSharp,
+            t.path(),
+            &dirs,
+            none(),
+            [t.path().to_path_buf()],
+        );
+        assert_eq!(cs.missing, None);
+        let cpp = setup_in(Lang::Cpp, t.path(), &dirs, none(), none());
+        assert_eq!(cpp.missing.as_deref(), Some("compile_commands.json"));
+        fs::write(t.path().join("compile_commands.json"), "[]").unwrap();
+        assert_eq!(
+            setup_in(Lang::Cpp, t.path(), &dirs, none(), none()).missing,
+            None
+        );
+        // ディレクトリはサーバーの実行ファイルに数えない。
+        fs::create_dir_all(dirs[1].join("gopls")).unwrap();
+        let go = setup_in(Lang::Go, t.path(), &dirs, none(), none());
+        assert!(!go.installed && go.missing.is_none());
+        assert!(!setup_in(Lang::Markdown, t.path(), &dirs, none(), none()).installed);
+    }
+
+    #[test]
+    fn every_language_with_a_server_has_an_install_command() {
+        for lang in Lang::ALL {
+            assert_eq!(
+                install_command(lang).is_empty(),
+                lang == Lang::Markdown,
+                "{lang:?}"
+            );
+        }
+        assert!(install_command(Lang::Tsx).contains("typescript@6"));
+    }
 
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);

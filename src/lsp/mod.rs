@@ -12,7 +12,9 @@ use crate::lang::Lang;
 use crate::store;
 
 pub use client::query_with;
-pub use servers::{ServerSpec, pick_java_home, server_for, server_name};
+pub use servers::{
+    ServerSpec, Setup, install_command, pick_java_home, server_for, server_name, setup,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {

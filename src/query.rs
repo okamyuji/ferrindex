@@ -14,7 +14,8 @@ use crate::describe::{description, tokens};
 use crate::extract::extract;
 use crate::fresh::{self, Found, View, is_binary};
 use crate::index::contains_ignore_ascii_case;
-use crate::lang::{kind_name, lang_of};
+use crate::lang::{Lang, kind_name, lang_of};
+use crate::lsp;
 use crate::refcmd::{self, RefKind};
 use crate::store::find_root;
 use crate::trust;
@@ -31,7 +32,7 @@ const SHOW_LIMIT: usize = 3;
 const MAP_LIMIT: usize = 200;
 const SHOW_MAX_LINES: usize = 200;
 
-const USAGE: &str = "usage: ferrindex update [--rebuild] [--stats] | trust | untrust | find <name> [--limit N] | files <substr> [--limit N] | outline <file> | show <name> [--limit N] | map [<dir>] [--limit N] | refs <name> [--limit N] [--precise] | callers <name> [--limit N] [--precise] | impls <name> [--limit N] [--precise] | supers <name> [--limit N] [--precise]";
+const USAGE: &str = "usage: ferrindex update [--rebuild] [--stats] | trust | untrust | servers | find <name> [--limit N] | files <substr> [--limit N] | outline <file> | show <name> [--limit N] | map [<dir>] [--limit N] | refs <name> [--limit N] [--precise] | callers <name> [--limit N] [--precise] | impls <name> [--limit N] [--precise] | supers <name> [--limit N] [--precise]";
 
 pub(crate) struct Fail {
     code: u8,
@@ -97,6 +98,7 @@ enum Cmd {
     Refs(RefKind, String),
     /// `--precise` に言語サーバーの起動を許すか。
     Trust(bool),
+    Servers,
 }
 
 struct Cli {
@@ -165,10 +167,11 @@ fn command(name: &OsStr, pos: &[&OsString], flags: &Flags) -> Res<Cmd> {
         (Some("map"), [d]) => Cmd::Map(Some(PathBuf::from(d))),
         (Some("trust"), []) => Cmd::Trust(true),
         (Some("untrust"), []) => Cmd::Trust(false),
+        (Some("servers"), []) => Cmd::Servers,
         (
             Some(
                 "update" | "find" | "files" | "show" | "outline" | "map" | "refs" | "callers"
-                | "impls" | "supers" | "trust" | "untrust",
+                | "impls" | "supers" | "trust" | "untrust" | "servers",
             ),
             _,
         ) => {
@@ -188,7 +191,9 @@ fn parse(args: &[OsString]) -> Res<Cli> {
     if (flags.rebuild || flags.stats) && !update {
         return Err(Fail::usage("--rebuild and --stats belong to update"));
     }
-    if flags.limit.is_some() && (update || matches!(cmd, Cmd::Outline(_) | Cmd::Trust(_))) {
+    if flags.limit.is_some()
+        && (update || matches!(cmd, Cmd::Outline(_) | Cmd::Trust(_) | Cmd::Servers))
+    {
         return Err(Fail::usage("--limit does not apply to this subcommand"));
     }
     if flags.precise && !matches!(cmd, Cmd::Refs(..)) {
@@ -333,6 +338,11 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
     match &cli.cmd {
         Cmd::Outline(file) => outline(file, out),
         Cmd::Trust(on) => trust_root(cwd, *on, out),
+        Cmd::Servers => {
+            let root = root_of(cwd)?;
+            let view = fresh::refresh(&root).map_err(|e| Fail::fresh(e, "rg --files"))?;
+            servers(&root, &view, out)
+        }
         Cmd::Update { rebuild, stats } => {
             let ctx = Ctx::new(cwd, "rg --files".into())?;
             let view = if *rebuild {
@@ -647,12 +657,16 @@ fn map_dir(ctx: &Ctx, dir: Option<&Path>) -> Res<Vec<u8>> {
     Ok(dir_prefix(rel))
 }
 
-/// 信頼は端末の利用者だけが与えられる。端末を持たない Claude Code の Bash などは自分で信頼できない。
-fn trust_root(cwd: &Path, on: bool, out: &mut impl Write) -> Res {
-    let root = find_root(cwd).ok_or_else(|| Fail {
+fn root_of(cwd: &Path) -> Res<PathBuf> {
+    find_root(cwd).ok_or_else(|| Fail {
         code: EXIT_UNUSABLE,
         msg: "ferrindex: not inside a git repository".into(),
-    })?;
+    })
+}
+
+/// 信頼は端末の利用者だけが与えられる。端末を持たない Claude Code の Bash などは自分で信頼できない。
+fn trust_root(cwd: &Path, on: bool, out: &mut impl Write) -> Res {
+    let root = root_of(cwd)?;
     if on && !io::stdin().is_terminal() {
         return Err(Fail {
             code: EXIT_USAGE,
@@ -664,6 +678,34 @@ fn trust_root(cwd: &Path, on: bool, out: &mut impl Write) -> Res {
     out.write_all(&escape_control(root.as_os_str().as_bytes()))?;
     out.write_all(b"\n")?;
     Ok(true)
+}
+
+/// 索引にある言語ごとに、ファイル数と言語サーバーの導入状況をタブ区切りで出す。
+fn servers(root: &Path, view: &View, out: &mut impl Write) -> Res {
+    let files = view.files();
+    writeln!(
+        out,
+        "language\tfiles\tserver\tinstalled\tprerequisite\tinstall"
+    )?;
+    let mut any = false;
+    for lang in Lang::ALL.into_iter().filter(|&l| l != Lang::Markdown) {
+        let n = files.iter().filter(|(_, s)| s.lang == lang as u8).count();
+        if n == 0 {
+            continue;
+        }
+        let st = lsp::setup(lang, root);
+        writeln!(
+            out,
+            "{}\t{n}\t{}\t{}\t{}\t{}",
+            format!("{lang:?}").to_lowercase(),
+            lsp::server_name(lang),
+            if st.installed { "yes" } else { "no" },
+            st.missing.as_deref().unwrap_or("ok"),
+            lsp::install_command(lang),
+        )?;
+        any = true;
+    }
+    Ok(any)
 }
 
 /// `limit` は表示した件数で数える（バイナリと消えたファイルは数えない）。
