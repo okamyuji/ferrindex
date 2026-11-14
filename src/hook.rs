@@ -16,28 +16,36 @@ fn cwd_of(input: &str) -> Option<PathBuf> {
     v.get("cwd")?.as_str().map(PathBuf::from)
 }
 
-/// 索引が無いときだけ `update` を切り離して起動する。hook は止めず何も出力しない:
+const GUIDANCE: &str = "このリポジトリでは ferrindex の索引を使えます。
+定義の場所は `ferrindex find <名前>`（`Class.method` も可）、定義の本体だけは `ferrindex show <名前>`、ファイルの定義一覧は `ferrindex outline <file>`、ファイル名は `ferrindex files <部分文字列>` で引いてください。ファイル全体を Read する前に使ってください。
+終了コード 3 のときは `rg -n` を使ってください。
+";
+
+const BUILDING: &str = "索引を背景で作成中です。最初の検索は待つことがあります。\n";
+
+/// git ルートの中なら標準出力に出す案内を返す。それ以外と失敗では空文字列を返す。
 /// SessionStart の標準出力は Claude の文脈に入る。
-pub fn session_start(stdin: impl Read) {
+/// 索引が無いときは `update` を切り離して起動する。hook は止めない。
+pub fn session_start(stdin: impl Read) -> String {
     let mut input = String::new();
     if stdin
         .take(MAX_INPUT_BYTES)
         .read_to_string(&mut input)
         .is_err()
     {
-        return;
+        return String::new();
     }
     let Some(root) = cwd_of(&input).and_then(|c| find_root(&c)) else {
-        return;
+        return String::new();
     };
     if cache_dir(&root).join(MAIN_FILE).exists() {
-        return;
+        return GUIDANCE.to_string();
     }
     let Ok(exe) = std::env::current_exe() else {
-        return;
+        return String::new();
     };
     // 子は待たない。親が先に終わっても子は process_group(0) で端末のシグナルから離れて続く。
-    let _ = Command::new(exe)
+    let spawned = Command::new(exe)
         .arg("update")
         .current_dir(root)
         .stdin(Stdio::null())
@@ -45,11 +53,21 @@ pub fn session_start(stdin: impl Read) {
         .stderr(Stdio::null())
         .process_group(0)
         .spawn();
+    match spawned {
+        Ok(_) => format!("{GUIDANCE}{BUILDING}"),
+        Err(_) => GUIDANCE.to_string(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guidance_fits_four_lines_with_building_note() {
+        assert_eq!(GUIDANCE.lines().count(), 3);
+        assert_eq!(format!("{GUIDANCE}{BUILDING}").lines().count(), 4);
+    }
 
     #[test]
     fn reads_cwd_string() {

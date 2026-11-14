@@ -67,7 +67,26 @@ fn wait_for_index(xdg: &Path) -> PathBuf {
 
 fn assert_silent_ok(h: &Hook) {
     assert_eq!(h.code, 0);
-    assert!(h.out.is_empty());
+    assert!(h.out.is_empty(), "{}", String::from_utf8_lossy(&h.out));
+}
+
+fn guidance(h: &Hook) -> String {
+    assert_eq!(h.code, 0);
+    String::from_utf8(h.out.clone()).unwrap()
+}
+
+fn assert_guidance(text: &str) {
+    assert!(text.lines().count() <= 4, "{text}");
+    for needle in [
+        "ferrindex find <名前>",
+        "ferrindex show <名前>",
+        "ferrindex outline <file>",
+        "ferrindex files <部分文字列>",
+        "終了コード 3",
+        "rg -n",
+    ] {
+        assert!(text.contains(needle), "missing {needle}: {text}");
+    }
 }
 
 #[test]
@@ -75,7 +94,9 @@ fn builds_missing_index_in_background() {
     let r = Repo::new();
     r.write("src/a.rs", SAMPLE);
     let h = hook(&r.xdg, &input(&r.root));
-    assert_silent_ok(&h);
+    let text = guidance(&h);
+    assert_guidance(&text);
+    assert!(text.contains("最初の検索は待つことがあります"), "{text}");
     wait_for_index(&r.xdg);
     let found = r.run(&["find", "free_fn"]);
     assert_eq!(found.code, 0);
@@ -85,7 +106,7 @@ fn builds_missing_index_in_background() {
 fn finds_root_from_subdirectory() {
     let r = Repo::new();
     r.write("src/a.rs", SAMPLE);
-    assert_silent_ok(&hook(&r.xdg, &input(&r.root.join("src"))));
+    assert_guidance(&guidance(&hook(&r.xdg, &input(&r.root.join("src")))));
     wait_for_index(&r.xdg);
 }
 
@@ -97,7 +118,9 @@ fn leaves_existing_index_alone() {
     let main = wait_for_index(&r.xdg);
     let before = fs::metadata(&main).unwrap().modified().unwrap();
     r.write("b.rs", "fn added() {}\n");
-    assert_silent_ok(&hook(&r.xdg, &input(&r.root)));
+    let text = guidance(&hook(&r.xdg, &input(&r.root)));
+    assert_guidance(&text);
+    assert!(!text.contains("待つ"), "{text}");
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(fs::metadata(&main).unwrap().modified().unwrap(), before);
 }
