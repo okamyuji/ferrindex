@@ -448,6 +448,34 @@ fn rust_supertraits_are_inherit_references_but_generic_bounds_are_not() {
 }
 
 #[test]
+fn rust_where_self_bounds_on_a_trait_are_supertraits() {
+    let src = "trait C where Self: Base + a::Other + b::Deep<T> {}\n\
+               trait D<T> where T: NotT, Self::Item: NotItem {}\n\
+               impl X for Y where Self: NotImpl {}\n\
+               trait F { fn m() where Self: NotMethod; }\n\
+               trait H where Self: Fn(Req) -> Resp {}\n\
+               fn g<T>() where Self: NotFn {}\n\
+               trait K where T: NotFirst, Self: Last {}\n";
+    let refs = refs_of(Lang::Rust, src.as_bytes());
+    let inherit: Vec<(&str, u32, Option<&str>)> = refs
+        .iter()
+        .filter(|r| r.kind == REF_INHERIT)
+        .map(|r| (r.name.as_str(), r.line, r.container.as_deref()))
+        .collect();
+    assert_eq!(
+        inherit,
+        [
+            ("Base", 1, Some("C")),
+            ("Other", 1, Some("C")),
+            ("Deep", 1, Some("C")),
+            ("X", 3, Some("Y")),
+            ("Fn", 5, Some("H")),
+            ("Last", 7, Some("K")),
+        ]
+    );
+}
+
+#[test]
 fn columns_follow_multibyte_text_across_lines() {
     let src = "fn f() {\n    \"é😀\"; a(); b();\n    c(); \"😀\"; d();\n}\n";
     let refs = refs_of(Lang::Rust, src.as_bytes());

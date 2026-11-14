@@ -90,7 +90,7 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
                 let (kind, container, container_at) = match impl_item {
                     Some(item) => (REF_INHERIT, impl_type_name(item, src), None),
                     None => (
-                        classify(&ancestors, step(&cursor, &afters)),
+                        classify(&ancestors, step(&cursor, &afters, src)),
                         open.last().map(|&i| defs[i].name.clone()),
                         open.last().map(|&i| (defs[i].line, defs[i].col)),
                     ),
@@ -105,7 +105,7 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
                 });
             }
         }
-        let here = step(&cursor, &afters);
+        let here = step(&cursor, &afters, src);
         if cursor.goto_first_child() {
             ancestors.push(here);
             let named = node.named_child_count() - usize::from(cursor.node().is_named());
@@ -168,12 +168,17 @@ fn last_type_name(mut node: Node) -> Option<Node> {
     }
 }
 
-fn step<'a>(cursor: &TreeCursor<'a>, afters: &[usize]) -> Step<'a> {
+fn step<'a>(cursor: &TreeCursor<'a>, afters: &[usize], src: &[u8]) -> Step<'a> {
     let node = cursor.node();
+    let kind = node.kind();
     Step {
-        kind: node.kind(),
+        kind,
         field: cursor.field_name(),
         last: afters.last() == Some(&0),
+        self_bound: kind == "where_predicate"
+            && node
+                .child_by_field_name("left")
+                .is_some_and(|l| &src[l.byte_range()] == b"Self"),
     }
 }
 
@@ -182,11 +187,13 @@ fn is_reference_kind(kind: &str) -> bool {
 }
 
 /// 木の一つの節点。`field` は親の中のフィールド名、`last` は親の最後の名前付きの子かどうか。
+/// `self_bound` は左辺が `Self` の where 述語かどうか。
 #[derive(Clone, Copy)]
 struct Step<'a> {
     kind: &'a str,
     field: Option<&'a str>,
     last: bool,
+    self_bound: bool,
 }
 
 const MEMBER_WORDS: [&str; 13] = [
@@ -211,7 +218,8 @@ const MEMBER_WORDS: [&str; 13] = [
 /// Java の `method_invocation` も受け手を `object` フィールドに持つ。
 /// method は `a.b.c` の `.b` も呼び出しなので、種類に `call` を含む規則のまま CALL になる。
 /// Python の基底クラスは `class_definition` の `superclasses` フィールドの argument_list に入る。
-/// Rust の `trait_bounds` は型引数の境界にも使われるので、親が `trait_item` のときだけ継承にする。
+/// Rust の `trait_bounds` は型引数の境界にも使われるので、トレイトの宣言の `trait C: Base` と
+/// `trait C where Self: Base` の境界だけを継承にする。
 /// 括弧は文脈を変えないので段数に数えない。
 fn classify(ancestors: &[Step], leaf: Step) -> u8 {
     let mut below = leaf;
@@ -248,10 +256,8 @@ fn classify(ancestors: &[Step], leaf: Step) -> u8 {
             };
         }
         fn_signature |= a.kind == "function_type" && below.field != Some("trait");
-        let supertrait = !fn_signature
-            && a.kind == "trait_bounds"
-            && i.checked_sub(1)
-                .is_some_and(|p| ancestors[p].kind == "trait_item");
+        let supertrait =
+            !fn_signature && a.kind == "trait_bounds" && supertrait_bounds(&ancestors[..i]);
         if supertrait || INHERIT_WORDS.iter().any(|w| a.kind.contains(w)) {
             return REF_INHERIT;
         }
@@ -261,6 +267,15 @@ fn classify(ancestors: &[Step], leaf: Step) -> u8 {
         below = *a;
     }
     REF_PLAIN
+}
+
+/// `trait_bounds` の祖先の並びが、トレイトの宣言の境界か、その where 節の `Self` の境界か。
+fn supertrait_bounds(above: &[Step]) -> bool {
+    match above {
+        [.., t] if t.kind == "trait_item" => true,
+        [.., t, w, p] => t.kind == "trait_item" && w.kind == "where_clause" && p.self_bound,
+        _ => false,
+    }
 }
 
 /// 1 始まりの UTF-16 列を、前に問うた位置からの差分だけ数えて求める。木を順にたどると位置は

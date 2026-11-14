@@ -232,6 +232,26 @@ fn rust_impls_and_supers_follow_impl_trait_for() {
 }
 
 #[test]
+fn rust_supers_and_impls_follow_where_self_bounds() {
+    let r = Repo::new();
+    r.write(
+        "a.rs",
+        "trait Base {}\ntrait C where Self: Base {}\ntrait D<T> where T: Base {}\n",
+    );
+    let o = r.run(&["supers", "C"]);
+    assert_eq!(
+        o.lines(),
+        ["a.rs:2:21 inherit in C\ttrait C where Self: Base {}"]
+    );
+    assert_eq!(r.run(&["supers", "D"]).code, 1);
+    let o = r.run(&["impls", "Base"]);
+    assert_eq!(
+        o.lines(),
+        ["a.rs:2:21 inherit in C\ttrait C where Self: Base {}"]
+    );
+}
+
+#[test]
 fn go_impls_and_supers_ask_for_precise() {
     let r = Repo::new();
     r.write(
