@@ -195,6 +195,19 @@ rust	2	rust-analyzer	yes	ok	rustup component add rust-analyzer
 c	1	clangd	no	compile_commands.json	brew install llvm
 ```
 
+### 導入用のskill
+
+リポジトリの`skills/ferrindex-lsp-setup/`は、Claude Code向けのskillです。
+`ferrindex servers`の出力から、入っていないサーバーと足りない前提を選択肢にして利用者に聞き、選ばれたものだけを入れます。
+`sudo`は使わず、`ferrindex trust`も実行しません。
+使うには、ディレクトリごと`~/.claude/skills/`へ写します。
+
+```sh
+cp -R skills/ferrindex-lsp-setup ~/.claude/skills/
+```
+
+Claude Codeで「ferrindexの言語サーバーを入れて」と頼むと使われます。
+
 ### 作業ツリーに作られるもの
 
 サーバーが作業領域やビルドの結果を作業ツリーに書かないよう、ferrindexは次の設定で起動します。
