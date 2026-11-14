@@ -428,7 +428,8 @@ fn misses_a_call(
 }
 
 /// 位置ごとにファイルを抽出し直し、その位置の参照の種類と、囲む最も内側の定義を添える。
-/// 作業ツリーの外の位置（依存ライブラリなど）と読めない位置は出さない。`limit` 件を超えた分は
+/// 作業ツリーの外の位置（依存ライブラリなど）と、ファイルが無い位置は出さない。それ以外で読めない
+/// 位置は、パスを添えたエラーにする。`limit` 件を超えた分は
 /// 整形せずに数える。整形は位置ごとにファイルを先頭から数え、ソース行を写すので重い。
 fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8, limit: usize) -> Res<Shown> {
     let mut parsed: HashMap<PathBuf, Option<Parsed>> = HashMap::new();
