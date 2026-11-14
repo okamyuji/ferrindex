@@ -3,6 +3,7 @@
 #   needs_answers references の前にサーバー側の要求を2つ送り、正しい返事が無ければ答えない
 #   garbage       ヘッダの無い行を出して黙る
 #   hang          何も答えない
+#   unsorted      references に重複を含む順不同の結果を返す
 #   loading       initialized で読み込み中（quiescent: false）を知らせ、最初の references に空で答えてから読み込み終わりを知らせる
 # FAKE_PID_FILE があれば自分の pid を書く。FAKE_EXIT_FILE があれば shutdown の後の exit で書く。
 # FAKE_FAIL に method 名があれば、その要求にエラーで答える。
@@ -129,6 +130,11 @@ while True:
             reply(m, [])
             loaded = True
             status(True)
+            continue
+        if mode == "unsorted":
+            b, a = root + "/b.rs", root + "/a.rs"
+            reply(m, [{"uri": u, "range": rng(line, ch)} for u, line, ch in
+                      [(b, 1, 0), (a, 4, 2), (b, 1, 0), (a, 4, 1), (a, 0, 9)]])
             continue
         here = {"uri": params["textDocument"]["uri"],
                 "range": rng(params["position"]["line"], params["position"]["character"])}

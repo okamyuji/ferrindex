@@ -50,7 +50,12 @@ pub fn query_with(
         server.settled(method, &at, deadline)
     });
     server.stop(result == Err(LspError::Timeout));
-    result
+    // csharp-ls などは同じ結果を呼ぶたびに違う順で返し、重複も含みうる。
+    result.map(|mut found| {
+        found.sort();
+        found.dedup();
+        found
+    })
 }
 
 fn start_failed(path: &Path, e: io::Error) -> LspError {

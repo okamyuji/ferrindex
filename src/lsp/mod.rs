@@ -22,7 +22,8 @@ pub enum Method {
 }
 
 /// 行と列は1始まり。列は UTF-16 の符号単位で数える（LSP の既定）。
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// 順序はパス、行、列の順（フィールドの並びがそのまま比較の順になる）。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Location {
     pub path: PathBuf,
     pub line: u32,

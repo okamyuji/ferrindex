@@ -66,10 +66,29 @@ fn references_are_parsed() {
     assert_eq!(
         got,
         vec![
-            loc(root.join("x.rs"), 3, 5),
-            loc(root.join("src/a b.rs"), 10, 1)
+            loc(root.join("src/a b.rs"), 10, 1),
+            loc(root.join("x.rs"), 3, 5)
         ]
     );
+}
+
+#[test]
+fn results_are_sorted_without_duplicates() {
+    let (_d, root) = repo();
+    let got = ask(
+        &fake(&[("FAKE_MODE", "unsorted")]),
+        &root,
+        Method::References,
+    )
+    .unwrap();
+    let (a, b) = (root.join("a.rs"), root.join("b.rs"));
+    let want = vec![
+        loc(a.clone(), 1, 10),
+        loc(a.clone(), 5, 2),
+        loc(a, 5, 3),
+        loc(b, 2, 1),
+    ];
+    assert_eq!(got, want);
 }
 
 #[test]
