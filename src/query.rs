@@ -214,8 +214,21 @@ impl Ctx {
     }
 
     fn display(&self, path: &[u8]) -> Vec<u8> {
-        relative_to(&self.prefix, path)
+        escape_control(&relative_to(&self.prefix, path))
     }
+}
+
+/// 出力は 1 行 1 件なので、パス中の改行などの制御文字は文字列に置き換える。
+fn escape_control(path: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(path.len());
+    for &b in path {
+        match b {
+            b'\n' => out.extend_from_slice(b"\\n"),
+            0..0x20 | 0x7f => out.extend(format!("\\x{b:02x}").bytes()),
+            _ => out.push(b),
+        }
+    }
+    out
 }
 
 /// 根相対の `path` を、根相対のディレクトリ `dir_prefix`（`a/b/` の形、根は空）からの相対にする。
@@ -396,10 +409,10 @@ fn outline(file: &Path, out: &mut impl Write) -> Res {
     let src = read_regular(file)?;
     let mut defs = extract(lang, &src);
     defs.sort_by_key(|d| (d.line, d.col));
-    let path = file.as_os_str().as_bytes();
+    let path = escape_control(file.as_os_str().as_bytes());
     for d in &defs {
         let l = def_line(
-            path,
+            &path,
             d.line,
             d.col,
             d.kind,
@@ -562,6 +575,17 @@ mod tests {
         assert_eq!(Fail::fresh(fresh::Error::Lock, hint).code, EXIT_UNUSABLE);
         let io = Fail::fresh(fresh::Error::Io(io::Error::other("disk")), hint);
         assert_eq!(io.code, EXIT_IO);
+    }
+
+    #[test]
+    fn escape_control_covers_c0_and_del_but_not_space_or_utf8() {
+        assert_eq!(escape_control(b"a\nb"), b"a\\nb");
+        assert_eq!(
+            escape_control(b"\x00\x1f\x7f\r\t"),
+            b"\\x00\\x1f\\x7f\\x0d\\x09"
+        );
+        assert_eq!(escape_control(b" ~\x80\xe3"), b" ~\x80\xe3");
+        assert_eq!(escape_control("日本.rs".as_bytes()), "日本.rs".as_bytes());
     }
 
     #[test]

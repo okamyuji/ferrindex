@@ -232,3 +232,24 @@ fn outline_caps_input_at_the_index_size_limit() {
     assert_eq!(over.err.lines().count(), 1, "{}", over.err);
     assert!(over.err.contains("1048576"), "{}", over.err);
 }
+
+#[test]
+fn control_characters_in_paths_are_escaped_in_every_command() {
+    let r = Repo::new();
+    r.write("d/a\nb\x01.rs", "fn zed() {}\n");
+    let name = "d/a\\nb\\x01.rs";
+    let rel = std::path::Path::new("d").join("a\nb\x01.rs");
+    let rel = rel.to_str().unwrap();
+    assert_eq!(
+        r.run(&["find", "zed"]).lines(),
+        [format!("{name}:1:4 function zed")]
+    );
+    assert_eq!(r.run(&["files", "d/"]).lines(), [name]);
+    let outline = r.run(&["outline", rel]);
+    assert_eq!(outline.lines(), [format!("{name}:1:4 function zed")]);
+    let show = r.run(&["show", "zed"]);
+    assert_eq!(show.lines()[0], format!("{name}:1-1 function zed"));
+    let map = r.run(&["map"]);
+    assert_eq!(map.lines().len(), 1, "{}", map.out);
+    assert!(map.lines()[0].starts_with(name), "{}", map.out);
+}
