@@ -371,14 +371,7 @@ fn bases(ctx: &Ctx, defs: &[Found]) -> Res<Vec<String>> {
         let Some((_, _, refs)) = parse(ctx, Path::new(OsStr::from_bytes(&d.path)))? else {
             continue;
         };
-        out.extend(
-            refs.into_iter()
-                .filter(|r| {
-                    r.kind == REF_INHERIT
-                        && r.container.as_deref().map(str::as_bytes) == Some(&d.name)
-                })
-                .map(|r| r.name),
-        );
+        out.extend(refs.into_iter().filter(|r| inherits(r, d)).map(|r| r.name));
     }
     Ok(out)
 }
@@ -539,6 +532,16 @@ fn indexed(
     emit(out, err, &lines, found.len())
 }
 
+/// `d` の基底を指す継承参照か。囲む定義から決まる参照は定義の位置で比べ、同名の入れ子の型を
+/// 区別する。`impl Trait for Type` の参照は型の名前で比べる。
+fn inherits(r: &Ref, d: &Found) -> bool {
+    r.kind == REF_INHERIT
+        && match r.container_at {
+            Some(at) => at == (d.line, d.col),
+            None => r.container.as_deref().map(str::as_bytes) == Some(&d.name),
+        }
+}
+
 /// 定義のファイルを今の内容で取り直し、定義の名前を囲みに持つ継承参照を出す。
 fn supers(
     ctx: &Ctx,
@@ -547,27 +550,26 @@ fn supers(
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> Res {
+    let mut parsed: HashMap<&[u8], Option<Parsed>> = HashMap::new();
     let mut seen = HashSet::new();
-    let mut lines = Vec::new();
-    for d in defs {
-        if !seen.insert((d.path.clone(), d.name.clone())) {
-            continue;
-        }
-        let Some(lang) = lang_of(Path::new(OsStr::from_bytes(&d.path))) else {
-            continue;
-        };
-        let Some(src) = read_rel(&ctx.root, &d.path)? else {
+    let (mut lines, mut total) = (Vec::new(), 0);
+    for d in &defs {
+        let Some((src, _, refs)) = cached(&mut parsed, &d.path, || {
+            parse(ctx, Path::new(OsStr::from_bytes(&d.path)))
+        })?
+        .as_ref() else {
             continue;
         };
-        let file_defs = extract(lang, &src);
-        for r in extract_refs(lang, &src, &file_defs) {
-            if r.kind == REF_INHERIT && r.container.as_deref().map(str::as_bytes) == Some(&d.name) {
-                lines.push(render(ctx, &Hit::new(&d.path, &r), Some(&src)));
+        for r in refs {
+            // 同じファイルの同名の型は同じ `impl` の参照を共有する。一度だけ出す。
+            if inherits(r, d) && seen.insert((&d.path, r.line, r.col)) {
+                total += 1;
+                if lines.len() < limit {
+                    lines.push(render(ctx, &Hit::new(&d.path, r), Some(src)));
+                }
             }
         }
     }
-    let total = lines.len();
-    lines.truncate(limit);
     emit(out, err, &lines, total)
 }
 

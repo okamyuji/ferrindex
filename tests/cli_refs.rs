@@ -872,8 +872,53 @@ fn supers_compare_only_the_bases_of_the_queried_type() {
     assert_eq!(o.lines(), ["s.py:1:7 inherit\tclass A2:"]);
 }
 
-const UNTRUSTED_HOW: &str = "絞るには、利用者が端末で `ferrindex trust` を実行してから --precise を使います";
-const AMBIGUOUS_NOTE: &str = "ferrindex: bar の定義が2件あります。名前一致なので、どの定義への呼び出しかを区別しません。";
+#[test]
+fn supers_of_a_nested_class_give_only_its_own_bases() {
+    let r = Repo::new();
+    r.write(
+        "n.py",
+        "class Base1: pass\nclass Base2: pass\nclass Left:\n    class X(Base1): pass\nclass Right:\n    class X(Base2): pass\n",
+    );
+    let o = r.run(&["supers", "Left.X"]);
+    assert_eq!(o.lines(), ["n.py:4:13 inherit in X\tclass X(Base1): pass"]);
+    let o = r.run(&["supers", "X"]);
+    assert_eq!(
+        o.lines(),
+        [
+            "n.py:4:13 inherit in X\tclass X(Base1): pass",
+            "n.py:6:13 inherit in X\tclass X(Base2): pass"
+        ]
+    );
+    let o = r.run(&["supers", "X", "--limit", "1"]);
+    assert_eq!(
+        (o.lines(), o.err.as_str()),
+        (vec!["n.py:4:13 inherit in X\tclass X(Base1): pass"], "… 1 more\n")
+    );
+    // サーバーの答えが Left.X の基底 Base1 だけなら、名前一致に戻らない。
+    let o = precise_py(
+        &r,
+        r#"[["n.py", 0, 6]]"#,
+        &["supers", "Left.X", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["n.py:1:7 inherit\tclass Base1: pass"]);
+}
+
+#[test]
+fn supers_list_an_impl_once_for_same_named_types() {
+    let r = Repo::new();
+    r.write(
+        "x.rs",
+        "struct X;\nmod m {\n    pub struct X;\n}\ntrait T {}\nimpl T for X {}\n",
+    );
+    let o = r.run(&["supers", "X"]);
+    assert_eq!(o.lines(), ["x.rs:6:6 inherit in X\timpl T for X {}"]);
+}
+
+const UNTRUSTED_HOW: &str =
+    "絞るには、利用者が端末で `ferrindex trust` を実行してから --precise を使います";
+const AMBIGUOUS_NOTE: &str =
+    "ferrindex: bar の定義が2件あります。名前一致なので、どの定義への呼び出しかを区別しません。";
 
 fn two_bar_defs() -> Repo {
     let r = Repo::new();
@@ -901,7 +946,9 @@ fn name_match_notes_that_the_qualifier_is_not_used() {
         assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"], "{cmd}");
         assert_eq!(
             o.err,
-            format!("ferrindex: 名前一致では Foo.bar の修飾を使わず、bar の呼び出しをすべて出します。{UNTRUSTED_HOW}\n"),
+            format!(
+                "ferrindex: 名前一致では Foo.bar の修飾を使わず、bar の呼び出しをすべて出します。{UNTRUSTED_HOW}\n"
+            ),
             "{cmd}"
         );
     }
@@ -910,9 +957,15 @@ fn name_match_notes_that_the_qualifier_is_not_used() {
 #[test]
 fn name_match_note_comes_before_the_more_line() {
     let r = two_bar_defs();
-    r.write("use.rs", "fn user(x: Foo) {\n    x.bar();\n    x.bar();\n}\n");
+    r.write(
+        "use.rs",
+        "fn user(x: Foo) {\n    x.bar();\n    x.bar();\n}\n",
+    );
     let o = r.run(&["callers", "bar", "--limit", "1"]);
-    assert_eq!(o.err, format!("{AMBIGUOUS_NOTE}{UNTRUSTED_HOW}\n… 1 more\n"));
+    assert_eq!(
+        o.err,
+        format!("{AMBIGUOUS_NOTE}{UNTRUSTED_HOW}\n… 1 more\n")
+    );
 }
 
 #[test]
@@ -948,3 +1001,4 @@ fn name_match_still_answers_when_the_trust_list_is_unreadable() {
     assert_eq!(o.code, 0, "{}", o.err);
     assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"]);
 }
+

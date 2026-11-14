@@ -20,6 +20,9 @@ pub struct Ref {
     pub kind: u8,
     /// 参照を囲む最も内側の定義の名前
     pub container: Option<String>,
+    /// その定義の名前の位置（行、列）。同名の定義を区別する。`impl Trait for Type` の参照では
+    /// `container` は囲む定義でなく型の名前なので、None
+    pub container_at: Option<(u32, u32)>,
 }
 
 /// 分類のために見る祖先の段数。入れ子が深い入力でも一つの参照の分類を定数時間にする。
@@ -84,11 +87,12 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
                     open.pop();
                 }
                 let impl_item = (lang == Lang::Rust).then(|| trait_impl_of(node)).flatten();
-                let (kind, container) = match impl_item {
-                    Some(item) => (REF_INHERIT, impl_type_name(item, src)),
+                let (kind, container, container_at) = match impl_item {
+                    Some(item) => (REF_INHERIT, impl_type_name(item, src), None),
                     None => (
                         classify(&ancestors, step(&cursor, &afters)),
                         open.last().map(|&i| defs[i].name.clone()),
+                        open.last().map(|&i| (defs[i].line, defs[i].col)),
                     ),
                 };
                 refs.push(Ref {
@@ -97,6 +101,7 @@ fn scan(lang: Lang, src: &[u8], defs: &[Def]) -> Option<Vec<Ref>> {
                     col,
                     kind,
                     container,
+                    container_at,
                 });
             }
         }

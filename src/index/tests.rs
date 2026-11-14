@@ -407,6 +407,7 @@ fn reference(name: &str, line: u32, kind: u8, container: Option<&str>) -> Packed
         col: 4,
         kind,
         container: container.map(Into::into),
+        container_at: None,
     }])[0]
 }
 

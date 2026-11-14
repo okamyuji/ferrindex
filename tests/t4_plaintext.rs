@@ -35,6 +35,7 @@ fn names_and_paths_do_not_appear_in_order_in_the_file() {
             col: 9,
             kind: REF_CALL,
             container: Some(REF_CONTAINER.into()),
+            container_at: None,
         }]),
     }];
     let dir = tempfile::tempdir().unwrap();
