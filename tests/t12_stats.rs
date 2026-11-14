@@ -43,7 +43,16 @@ fn stats_report_size_and_section_breakdown() {
     let names: Vec<&str> = parts.iter().map(|p| p.0).collect();
     assert_eq!(
         names,
-        ["header", "paths", "names", "offsets", "postings", "stamps"]
+        [
+            "header",
+            "paths",
+            "names",
+            "offsets",
+            "postings",
+            "stamps",
+            "ref_offsets",
+            "ref_postings"
+        ]
     );
     assert!(parts.iter().all(|p| p.1 > 0), "{parts:?}");
     assert_eq!(parts.iter().map(|p| p.1).sum::<u64>(), size);

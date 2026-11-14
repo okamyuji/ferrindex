@@ -4,6 +4,7 @@ pub mod extract;
 pub mod fresh;
 pub mod hook;
 pub mod index;
+pub mod intern;
 pub mod lang;
 mod markdown;
 pub mod query;

@@ -627,3 +627,76 @@ fn substring_limit_skips_names_without_definitions() {
     let hits = v.lookup_substring(b"needle").unwrap();
     assert!(hits.iter().any(|h| h.name == b"needle_z"), "{hits:?}");
 }
+
+fn ref_lines(v: &View, name: &str) -> Vec<(String, u32)> {
+    v.lookup_refs(name.as_bytes())
+        .unwrap()
+        .into_iter()
+        .map(|f| (String::from_utf8(f.path).unwrap(), f.line))
+        .collect()
+}
+
+fn with_fillers(e: &Env) {
+    for i in 0..20 {
+        put(e, &format!("f{i}.rs"), &format!("fn f{i}() {{}}\n"));
+    }
+}
+
+#[test]
+fn delta_hides_main_refs_of_the_same_path() {
+    let e = env();
+    with_fillers(&e);
+    put(&e, "a.rs", "fn caller() {\n    target();\n}\n");
+    put(&e, "b.rs", "fn other() {\n    target();\n}\n");
+    let v = run(&e);
+    assert_eq!(
+        ref_lines(&v, "target"),
+        [("a.rs".into(), 2), ("b.rs".into(), 2)]
+    );
+
+    put(&e, "a.rs", "fn caller() {\n\n\n    target();\n}\n");
+    let v = run(&e);
+    assert!(delta_path(&e).exists());
+    assert_eq!(
+        ref_lines(&v, "target"),
+        [("a.rs".into(), 4), ("b.rs".into(), 2)]
+    );
+
+    rm(&e, "b.rs");
+    let v = run(&e);
+    assert_eq!(ref_lines(&v, "target"), [("a.rs".into(), 4)]);
+}
+
+#[test]
+fn refs_survive_a_merge_into_the_main_index() {
+    let e = env();
+    with_fillers(&e);
+    put(&e, "a.rs", "fn caller() {\n    target();\n}\n");
+    run(&e);
+    for i in 0..20 {
+        put(
+            &e,
+            &format!("f{i}.rs"),
+            &format!("fn g{i}() {{ target(); }}\n"),
+        );
+    }
+    let v = run(&e);
+    assert!(!delta_path(&e).exists(), "the delta must have been merged");
+    let mut want: Vec<(String, u32)> = (0..20).map(|i| (format!("f{i}.rs"), 1)).collect();
+    want.push(("a.rs".into(), 2));
+    want.sort();
+    assert_eq!(ref_lines(&v, "target"), want);
+}
+
+#[test]
+fn plain_references_are_not_stored() {
+    let e = env();
+    put(
+        &e,
+        "a.rs",
+        "struct Base;\nstruct Sub(Base);\nfn f() {\n    callee();\n}\n",
+    );
+    let v = run(&e);
+    assert_eq!(ref_lines(&v, "callee"), [("a.rs".into(), 4)]);
+    assert!(ref_lines(&v, "Base").is_empty());
+}
