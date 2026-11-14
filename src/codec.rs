@@ -59,7 +59,14 @@ pub fn encode_rows(out: &mut Vec<u8>, rows: &[Row]) {
             None => (r.file, r.line),
             Some(p) => {
                 assert!((p.file, p.line) <= (r.file, r.line), "rows must be sorted");
-                (r.file - p.file, if r.file == p.file { r.line - p.line } else { r.line })
+                (
+                    r.file - p.file,
+                    if r.file == p.file {
+                        r.line - p.line
+                    } else {
+                        r.line
+                    },
+                )
             }
         };
         put_varint(out, u64::from(fd));
@@ -85,11 +92,21 @@ pub fn decode_rows(mut b: &[u8], max_file: u32, max_name: u32) -> Result<Vec<Row
         let col = u32::try_from(get_varint(b)?).map_err(|_| Corrupt)?;
         let container = u32::try_from(get_varint(b)?).map_err(|_| Corrupt)?;
         file = file.checked_add(fd).ok_or(Corrupt)?;
-        line = if i > 0 && fd == 0 { line.checked_add(ld).ok_or(Corrupt)? } else { ld };
+        line = if i > 0 && fd == 0 {
+            line.checked_add(ld).ok_or(Corrupt)?
+        } else {
+            ld
+        };
         if file >= max_file || container > max_name {
             return Err(Corrupt);
         }
-        rows.push(Row { file, line, col, kind, container });
+        rows.push(Row {
+            file,
+            line,
+            col,
+            kind,
+            container,
+        });
     }
     Ok(rows)
 }
@@ -101,7 +118,10 @@ pub fn key_by_rank(f: &fst::raw::Fst<impl AsRef<[u8]>>, rank: u64) -> Option<Vec
         if node.is_final() && acc + node.final_output().value() == rank {
             return Some(key);
         }
-        let t = node.transitions().take_while(|t| acc + t.out.value() <= rank).last()?;
+        let t = node
+            .transitions()
+            .take_while(|t| acc + t.out.value() <= rank)
+            .last()?;
         acc += t.out.value();
         key.push(t.inp);
         node = f.node(t.addr);
@@ -115,7 +135,13 @@ mod tests {
     use super::*;
 
     fn row(file: u32, line: u32, col: u32, kind: u8, container: u32) -> Row {
-        Row { file, line, col, kind, container }
+        Row {
+            file,
+            line,
+            col,
+            kind,
+            container,
+        }
     }
 
     #[test]
