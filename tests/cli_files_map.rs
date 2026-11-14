@@ -139,7 +139,10 @@ fn map_limit_and_errors() {
     let run = r.run(&["map", "--limit", "2"]);
     assert_eq!(run.lines().len(), 2);
     assert_eq!(run.err, "… 1 more\n");
-    assert_eq!(r.run(&["map", "nope"]).code, 2);
+    let missing = r.run(&["map", "nope"]);
+    assert_eq!(missing.code, 4);
+    assert_eq!(missing.err.lines().count(), 1, "{}", missing.err);
+    assert!(missing.err.contains("nope"), "{}", missing.err);
     r.write("empty/.keep", "");
     std::fs::write(r.root.join("file.txt"), "x").unwrap();
     assert_eq!(r.run(&["map", "file.txt"]).code, 2);

@@ -471,7 +471,7 @@ fn map_dir(ctx: &Ctx, dir: Option<&Path>) -> Res<Vec<u8>> {
         return Ok(ctx.prefix.clone());
     };
     let abs = fs::canonicalize(ctx.cwd.join(dir))
-        .map_err(|e| Fail::usage(format!("{}: {e}", dir.display())))?;
+        .map_err(|e| Fail::io(format!("{}: {e}", dir.display())))?;
     let rel = abs
         .strip_prefix(&ctx.root)
         .map_err(|_| Fail::usage(format!("{}: outside the repository", dir.display())))?;
