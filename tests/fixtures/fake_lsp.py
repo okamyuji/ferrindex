@@ -10,6 +10,7 @@
 # FAKE_PID_FILE があれば自分の pid を書く。FAKE_EXIT_FILE があれば shutdown の後の exit で書く。
 # FAKE_FAIL に method 名があれば、その要求にエラーで答える。
 # FAKE_REFS は references、implementation、supertypes の答え（[[パス, 0始まりの行, 0始まりの列], ...] の JSON）。相対パスは根からの相対。
+# references では {"問うた行 列": [...]} の形で、問うた位置ごとに答えを変えられる。
 # FAKE_LOG があれば、位置を問う要求ごとに「method 行 列」を1行足す。
 import json
 import os
@@ -134,8 +135,12 @@ while True:
                 pos = params["position"]
                 f.write("%s %d %d\n" % (method, pos["line"], pos["character"]))
         if os.environ.get("FAKE_REFS"):
+            refs = json.loads(os.environ["FAKE_REFS"])
+            if isinstance(refs, dict):
+                pos = params["position"]
+                refs = refs.get("%d %d" % (pos["line"], pos["character"]), [])
             reply(m, [{"uri": p if p.startswith("file:") else root + "/" + p, "range": rng(line, ch)}
-                      for p, line, ch in json.loads(os.environ["FAKE_REFS"])])
+                      for p, line, ch in refs])
             continue
         asked += 1
         if mode in ("growing", "changing"):

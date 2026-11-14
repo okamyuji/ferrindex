@@ -159,10 +159,24 @@ fn precise_lines(
     if defs.is_empty() {
         return Ok(Err(format!("{term}の定義が見つかりません")));
     }
-    if defs.len() > PRECISE_MAX_DEFS {
+    // 修飾の無い名前の呼び出しは、どれもその名前のどれかの定義を指すはず。修飾した名前でも
+    // 修飾の無い名前の定義すべてに問うて網羅を確かめ、修飾した定義（`asked` の先頭）の答えだけを出す。
+    let checks_calls = matches!(kind, RefKind::Refs | RefKind::Callers);
+    let name = if checks_calls {
+        last_segment(term)
+    } else {
+        term.to_string()
+    };
+    let mut asked = defs.clone();
+    if name != term {
+        let mut more = resolve_exact(view, &name).map_err(|c| corrupt(c, ctx))?;
+        more.retain(|d| d.kind != section && !defs.contains(d));
+        asked.extend(more);
+    }
+    if asked.len() > PRECISE_MAX_DEFS {
         return Ok(Err(format!(
-            "{term}の定義が{}件あり、問い合わせる上限の{PRECISE_MAX_DEFS}件を超えます",
-            defs.len()
+            "{name}の定義が{}件あり、問い合わせる上限の{PRECISE_MAX_DEFS}件を超えます",
+            asked.len()
         )));
     }
     let method = match kind {
@@ -172,26 +186,27 @@ fn precise_lines(
         RefKind::Supers => Method::Supertypes,
     };
     let deadline = Instant::now() + PRECISE_WAIT;
-    let mut found = Vec::new();
-    for d in &defs {
+    let (mut found, mut all) = (Vec::new(), Vec::new());
+    for (i, d) in asked.iter().enumerate() {
         let file = Path::new(OsStr::from_bytes(&d.path));
         // 索引の定義はどれも言語の決まるファイルにある。Markdown はサーバーが無いと答える。
         let lang = lang_of(file).unwrap_or(Lang::Markdown);
         match lsp::query(&ctx.root, lang, file, d.line, d.col, method, deadline) {
-            Ok(locs) => found.extend(locs),
+            Ok(locs) => {
+                if i < defs.len() {
+                    found.extend(locs.iter().cloned());
+                }
+                all.extend(locs);
+            }
             Err(e) => return Ok(Err(format!("{}: {e}", lsp::server_name(lang)))),
         }
     }
     found.sort();
     found.dedup();
     let root = canonical_root(ctx);
-    // 修飾の無い名前の呼び出しは、どれも索引にあるどれかの定義を指すはず。修飾した名前は
-    // 同名の別の定義を指す呼び出しと見分けられないので確かめない。
-    let checks_calls =
-        matches!(kind, RefKind::Refs | RefKind::Callers) && last_segment(term) == term;
     if checks_calls
         && !found.is_empty()
-        && misses_a_call(view, term, &root, &found).map_err(|c| corrupt(c, ctx))?
+        && misses_a_call(view, &name, &root, &all).map_err(|c| corrupt(c, ctx))?
     {
         return Ok(Err(
             "言語サーバーが取り込みや別名経由の呼び出しを返していません".to_string(),

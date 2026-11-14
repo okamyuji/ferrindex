@@ -562,18 +562,81 @@ fn precise_answer_missing_a_call_falls_back() {
     }
 }
 
-#[test]
-fn qualified_name_keeps_the_answer_without_the_call_check() {
+/// `Foo.bar`（2行7列）と `Baz.bar`（6行7列、どちらも0始まり）と、それぞれを呼ぶ u.rs。
+fn two_bars() -> Repo {
     let r = Repo::new();
     r.write("s.rs", common::SAMPLE);
-    r.write("u.rs", "fn u(x: Foo) {\n    x.bar();\n}\n");
+    r.write(
+        "u.rs",
+        "fn u(x: Foo, y: Baz) {\n    x.bar();\n    y.bar();\n}\n",
+    );
+    r
+}
+
+#[test]
+fn qualified_name_keeps_its_own_answer_when_every_bar_call_is_covered() {
+    let r = two_bars();
+    let log = r.xdg.with_file_name("log");
     let o = precise(
         &r,
-        &[("FAKE_REFS", r#"[["s.rs", 6, 7]]"#)],
+        &[
+            (
+                "FAKE_REFS",
+                r#"{"2 7": [["u.rs", 1, 6]], "6 7": [["u.rs", 2, 6]]}"#,
+            ),
+            ("FAKE_LOG", log.to_str().unwrap()),
+        ],
         &["refs", "Baz.bar", "--precise"],
     );
     assert_eq!(o.err, "");
-    assert_eq!(o.lines().len(), 1, "{:?}", o.lines());
+    assert_eq!(o.lines(), ["u.rs:3:7 call in u\ty.bar();"]);
+    // 修飾の無い `bar` の定義すべてに問う。
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(log.contains("textDocument/references 2 7\n"), "{log}");
+    assert!(log.contains("textDocument/references 6 7\n"), "{log}");
+}
+
+#[test]
+fn qualified_name_falls_back_when_a_bar_call_is_missing() {
+    let r = two_bars();
+    for cmd in ["refs", "callers"] {
+        let o = precise(
+            &r,
+            &[("FAKE_REFS", r#"{"6 7": [["u.rs", 2, 6]]}"#)],
+            &[cmd, "Baz.bar", "--precise"],
+        );
+        assert_eq!(
+            o.err,
+            "ferrindex: --precise: 言語サーバーが取り込みや別名経由の呼び出しを返していません。名前一致の結果です（未確定）\n",
+            "{cmd}"
+        );
+        assert_eq!(
+            o.lines(),
+            [
+                "u.rs:2:7 call in u\tx.bar();",
+                "u.rs:3:7 call in u\ty.bar();"
+            ],
+            "{cmd}"
+        );
+    }
+}
+
+#[test]
+fn qualified_name_checks_the_definition_cap_of_the_last_name() {
+    let r = two_bars();
+    let more: String = (0..4)
+        .map(|i| format!("struct Q{i};\nimpl Q{i} {{\n    fn bar(&self) {{}}\n}}\n"))
+        .collect();
+    r.write("q.rs", &more);
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["u.rs", 2, 6]]"#)],
+        &["refs", "Baz.bar", "--precise"],
+    );
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: barの定義が6件あり、問い合わせる上限の5件を超えます。名前一致の結果です（未確定）\n"
+    );
 }
 
 #[test]
