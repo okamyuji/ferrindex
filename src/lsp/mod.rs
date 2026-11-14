@@ -64,6 +64,10 @@ pub fn query(
     method: Method,
     deadline: Instant,
 ) -> Result<Vec<Location>, LspError> {
+    // clangd は compile_commands.json が無いと開いたファイルしか見ず、少ない答えを返す。
+    if matches!(lang, Lang::C | Lang::Cpp) && !root.join("compile_commands.json").is_file() {
+        return Err(LspError::NotInstalled("compile_commands.json".into()));
+    }
     let spec = match replaced(lang) {
         Some(spec) => spec,
         None => with_workspace(server_for(lang)?, lang, root),

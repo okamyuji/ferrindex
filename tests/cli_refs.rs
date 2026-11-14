@@ -486,3 +486,33 @@ fn precise_answer_that_never_settles_falls_back() {
         "ferrindex: rust-analyzer: 答えが期限内に定まりませんでした。名前一致の結果です（未確定）\n"
     );
 }
+
+const C_FILE: &str = "int target(void) { return 0; }\nint f(void) { return target(); }\n";
+
+#[test]
+fn c_without_compile_commands_does_not_start_clangd() {
+    let r = Repo::new();
+    r.write("x.c", C_FILE);
+    let log = r.xdg.with_file_name("log");
+    let server = fake_server();
+    let env = [
+        ("FERRINDEX_LSP_C", server.as_str()),
+        ("FAKE_REFS", r#"[["x.c", 1, 21]]"#),
+        ("FAKE_LOG", log.to_str().unwrap()),
+    ];
+    let o = r.run_with(&env, &["refs", "target", "--precise"]);
+    assert!(!log.exists());
+    assert_eq!(
+        o.lines(),
+        ["x.c:2:22 call in f\tint f(void) { return target(); }"]
+    );
+    assert_eq!(
+        o.err,
+        "ferrindex: clangd: compile_commands.jsonが見つかりません。名前一致の結果です（未確定）\n"
+    );
+
+    r.write("compile_commands.json", "[]\n");
+    let o = r.run_with(&env, &["refs", "target", "--precise"]);
+    assert!(log.exists());
+    assert_eq!(o.err, "");
+}

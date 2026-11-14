@@ -2,38 +2,38 @@
 
 ## 概要
 
-ferrindex は git リポジトリの定義とファイルを一瞬で探す CLI です。
-LLM エージェントが `grep` でリポジトリ全体を読み進める代わりに使います。
+ferrindexはgitリポジトリの定義とファイルを一瞬で探すCLIです。
+LLMエージェントが`grep`でリポジトリ全体を読み進める代わりに使います。
 定義の名前から場所を引けるので、読み込むトークン量を減らせます。
 
 ## 導入
 
-Rust 1.100 が必要です。リポジトリのルートで次を実行します。
+Rust 1.100が必要です。リポジトリのルートで次を実行します。
 
 ```sh
 cargo install --path .
 ```
 
-対象は macOS だけです。常駐プロセスはありません。
+対象はmacOSだけです。常駐プロセスはありません。
 
 ## 使い方
 
-`outline` はファイルを直接読むので、git リポジトリの外でも使えます。
-それ以外のサブコマンドは git リポジトリの中で実行します。
+`outline`はファイルを直接読むので、gitリポジトリの外でも使えます。
+それ以外のサブコマンドはgitリポジトリの中で実行します。
 検索のたびに索引を最新にするので、事前の準備は要りません。
 
-- `ferrindex update [--rebuild] [--stats]` 索引を更新します。`--rebuild` は全件を作り直します。
-- `ferrindex find <name> [--limit N]` 名前で定義を探します。各行の末尾にタブで区切って、その定義の行（前後の空白を除き 160 字まで）を付けます。
-- `ferrindex files <substr> [--limit N]` パスの一部でファイルを探します。
-- `ferrindex outline <file>` ファイル内の定義を一覧します。
-- `ferrindex show <name> [--limit N]` 定義の本体を表示します。
-- `ferrindex map [<dir>] [--limit N]` ファイルごとの概要を一覧します。
-- `ferrindex refs <name> [--limit N] [--precise]` 名前を参照しているコードの位置を一覧します。コメントと文字列の中は数えません。
-- `ferrindex callers <name> [--limit N] [--precise]` 名前を呼び出している位置を一覧します。
-- `ferrindex impls <name> [--limit N] [--precise]` 名前の型を継承、実装している位置を一覧します。
-- `ferrindex supers <name> [--limit N] [--precise]` 名前の型が継承、実装している型を一覧します。
+- `ferrindex update [--rebuild] [--stats]`索引を更新します。`--rebuild`は全件を作り直します。
+- `ferrindex find <name> [--limit N]`名前で定義を探します。各行の末尾にタブで区切って、その定義の行（前後の空白を除き160字まで）を付けます。
+- `ferrindex files <substr> [--limit N]`パスの一部でファイルを探します。
+- `ferrindex outline <file>`ファイル内の定義を一覧します。
+- `ferrindex show <name> [--limit N]`定義の本体を表示します。
+- `ferrindex map [<dir>] [--limit N]`ファイルごとの概要を一覧します。
+- `ferrindex refs <name> [--limit N] [--precise]`名前を参照しているコードの位置を一覧します。コメントと文字列の中は数えません。
+- `ferrindex callers <name> [--limit N] [--precise]`名前を呼び出している位置を一覧します。
+- `ferrindex impls <name> [--limit N] [--precise]`名前の型を継承、実装している位置を一覧します。
+- `ferrindex supers <name> [--limit N] [--precise]`名前の型が継承、実装している型を一覧します。
 
-参照の4コマンドは、各行に参照の種類（`call`、`inherit`、`ref`）と、参照を囲む最も内側の定義を`in <定義>`の形で付けます。
+参照の4コマンドは各行に参照の種類（`call`、`inherit`、`ref`）と、参照を囲む最も内側の定義を`in <定義>`の形で付けます。
 
 出力例です。
 
@@ -51,31 +51,46 @@ $ ferrindex map src
 src/cli/alias.rs  ~2806  CLI aliases (`awscli/alias.py`): the `[toplevel]` aliases of the main
 ```
 
-`map` の `~N` 列は、ファイルの token 数の見積もりです。
-コードは文字数を 3.5 で、それ以外は 4.0 で割ります。
+`map`の`~N`列はファイルのtoken数の見積もりです。
+コードは文字数を3.5で、それ以外は4.0で割ります。
 
 終了コードは次のとおりです。
 
-- 0 結果があります。
-- 1 結果がありません。
-- 2 使い方が誤っています。
-- 3 索引が使えません。
-- 4 その他の I/O エラーです。
+- 0結果があります。
+- 1結果がありません。
+- 2使い方が誤っています。
+- 3索引が使えません。
+- 4その他のI/Oエラーです。
 
 ## --precise
 
-参照の4コマンドは、既定では名前の一致で答えます。
+参照の4コマンドは既定では名前の一致で答えます。
 同じ名前の別の定義への参照も混ざりますが、索引から即座に返せます。
 `--precise`を付けると、ferrindexは定義の言語の言語サーバーをその場で起動して問い合わせ、答えを得たらサーバーを止めます。
 サーバーは常駐しません。
 
-同じ名前の定義が複数あるときは、定義ごとに問い合わせて結果を合わせます。
-定義が5件を超える名前では、問い合わせずに名前一致の結果を返します。
-待ちの上限は、すべての問い合わせを合わせて30秒です。
+多くのサーバーはプロジェクトを読み込み終える前にも、そうと知らせずに少ない答えを返します。
+そのためferrindexは最初の答えを得た後も、同じ問い合わせを約1秒おきに送り直します。
+続けて2回、同じ位置の集合が返ったときに、その答えを結果として採ります。
 
-問い合わせられないとき、ferrindexは名前一致の結果を返し、標準エラーに理由を出します。
-該当するのは、定義が索引に無い場合、定義が多すぎる場合、サーバーが見つからない場合、起動に失敗した場合、30秒以内に答えが無い場合です。
-理由の行は`ferrindex: <サーバー名>: <理由>。名前一致の結果です（未確定）`の形になり、終了コードは名前一致と同じです。
+同じ名前の定義が複数あるときは、定義ごとに問い合わせて結果を合わせます。
+定義が5件を超える名前では問い合わせずに名前一致の結果を返します。
+待ちの上限はすべての問い合わせを合わせて30秒です。
+
+言語サーバーで確かめられないとき、ferrindexは名前一致の結果を返し、標準エラーに理由を出します。
+理由の行は`ferrindex: <サーバー名>: <理由>。名前一致の結果です（未確定）`の形で、終了コードは名前一致と同じです。
+次の場合が該当します。
+
+- 定義が索引に無いか、5件を超えています。
+- サーバーが見つからないか、起動に失敗しました。
+- 30秒以内に答えが無いか、答えが定まりませんでした。
+- サーバーの答えが0件でした。読み込みの途中でも0件と答えるサーバーがあるので、0件は確かな答えとして扱いません。名前一致も0件なら、理由は出さずに終了コード1で終わります。
+- C、C++のリポジトリの根に`compile_commands.json`がありません。clangdはこのファイルが無いと開いたファイルしか見ないので、ferrindexはclangdを起動しません。
+- サーバーが問い合わせの種類に対応していません。solargraphとlua-language-serverは呼び出しの階層（callHierarchy）に対応しないので、`callers --precise`はいつも名前一致に戻ります。
+
+rust-analyzerは初回の起動で、build scriptとproc macroを作ります。
+大きなリポジトリでは30秒を越えて名前一致に戻ることがあります。
+作ったものは索引のキャッシュの下に残るので、2回目からは速く答えます。
 
 ```text
 $ ferrindex callers walk_builder --precise --limit 2
@@ -96,7 +111,7 @@ ferrindexが起動するサーバーは次のとおりです。
 | Java | jdtls | JDK 25以上。`FERRINDEX_JAVA_HOME`、Homebrewのopenjdk、`/usr/libexec/java_home`の順に探します。 |
 | C# | csharp-ls | .NET。`DOTNET_ROOT`、Homebrewのdotnet、`/usr/local/share/dotnet`の順に探します。リポジトリの`global.json`が求めるSDKも要ります。 |
 | Ruby | solargraph | |
-| C、C++ | clangd | |
+| C、C++ | clangd | リポジトリの根の`compile_commands.json` |
 | Swift | sourcekit-lsp | |
 | Lua | lua-language-server | |
 | Dart | dart language-server | |
@@ -105,17 +120,17 @@ ferrindexが起動するサーバーは次のとおりです。
 
 ### 作業ツリーに作られるもの
 
-ferrindexは、サーバーが作業領域やビルドの結果を作業ツリーに書かないよう、次の設定で起動します。
+サーバーが作業領域やビルドの結果を作業ツリーに書かないよう、ferrindexは次の設定で起動します。
 
 - jdtlsの作業領域（`-data`）は索引のキャッシュの下に置きます。`.project`などのメタデータもそこに書かせ、自動ビルドは止めます。
 - rust-analyzerが呼ぶcargoの`target/`は、`CARGO_TARGET_DIR`で索引のキャッシュの下に向けます。
+- sourcekit-lspが使うSwiftPMの`.build/`は、`--scratch-path`で索引のキャッシュの下に向けます。
 
 それでもサーバーが作業ツリーに作るものがあります。
 
 | サーバー | 作られるもの |
 |---|---|
 | csharp-ls | 各プロジェクトの`obj/`。MSBuildが依存の復元とプロジェクトの評価に使います。 |
-
 
 ### サーバーのプロセス
 
@@ -127,41 +142,41 @@ Ctrl-Cや`kill`でferrindexを途中で止めた場合も、同じように止�
 ## 鮮度
 
 検索のたびに全ファイルの更新時刻を走査し、変わったファイルだけを解析し直します。
-編集したのが人でも他のツールでも、結果は常に現在のファイルを反映します。
+編集したのが人でも他のツールでも結果は常に現在のファイルを反映します。
 
 ## 対応言語
 
-Rust、Python、TypeScript（TSX を含む）、JavaScript、Go、Ruby、Java、C、C++、C#、Swift、Dart、Lua、Markdown に対応します。
+Rust、Python、TypeScript（TSXを含む）、JavaScript、Go、Ruby、Java、C、C++、C#、Swift、Dart、Lua、Markdownに対応します。
 
 ### 抽出できない定義
 
-- Dart の abstract メソッド
-- C++ のクラス外定義 `A<T>::f` と `A::B::f`
+- Dartのabstractメソッド
+- C++ のクラス外定義`A<T>::f`と`A::B::f`
 
-`map` の概要は、先頭 20 行にある最初のコメント、見出し、Python の docstring からだけ取ります。
+`map`の概要は先頭20行にある最初のコメント、見出し、Pythonのdocstringからだけ取ります。
 
 ## 索引の保存
 
-索引は `$XDG_CACHE_HOME/ferrindex` に置きます。未設定なら `~/.cache/ferrindex` です。
+索引は`$XDG_CACHE_HOME/ferrindex`に置きます。未設定なら`~/.cache/ferrindex`です。
 リポジトリの作業ツリーにはファイルを作りません。
 
-名前とパスの文字列は FST の中にだけ入ります。
+名前とパスの文字列はFSTの中にだけ入ります。
 索引は圧縮されているだけで、暗号化されていません。
-ファイルを読める人は、名前とパスを取り出せます。
+ファイルを読める人は名前とパスを取り出せます。
 
 ## 索引が使えないとき
 
-ferrindex が終了コード 3 を返したら、索引が使えません。
-git の外で実行した場合や、索引が壊れていて作り直せない場合です。
-そのときは `rg -n` で探します。
+ferrindexが終了コード3を返したら、索引が使えません。
+gitの外で実行した場合や、索引が壊れていて作り直せない場合です。
+そのときは`rg -n`で探します。
 
 リポジトリの中に読めないディレクトリやファイルがあると、ferrindexはそのパスを示して終了コード4で止まります。
 結果を欠かしたまま返さないためです。
 dockerのデータディレクトリのように索引に要らないものは、`.gitignore`に足すと走査から外れます。
 
-## Claude Code の hook
+## Claude Codeのhook
 
-セッションを始めたときに索引を作っておくには、`~/.claude/settings.json` に次を足します。
+セッションを始めたときに索引を作っておくには、`~/.claude/settings.json`に次を足します。
 
 ```json
 {
@@ -185,31 +200,31 @@ dockerのデータディレクトリのように索引に要らないものは�
 }
 ```
 
-hook は標準入力の JSON から `cwd` を読みます。
-cwd が git リポジトリの中にあるときは、ferrindex の使い方を短い案内として標準出力に出します。
-案内は、`find` が各定義の行を表示するので確認の grep や Read は要らないこと、本体は `show` で直接引くこと、呼び出し元の検索は `rg -n` を使うことを伝えます。
-Claude Code は SessionStart の標準出力を Claude の文脈に加えるので、Claude は Grep や Read より先に ferrindex を使えます。
-索引がまだ無いときは、`ferrindex update` を切り離して起動し、最初の検索が待つことがある旨を案内に足します。
-git リポジトリの外や入力の誤りでは何も出力しません。いずれの場合も終了コードは 0 です。
+hookは標準入力のJSONから`cwd`を読みます。
+cwdがgitリポジトリの中にあるときは、ferrindexの使い方を短い案内として標準出力に出します。
+案内は、`find`が各定義の行を表示するので確認のgrepやReadは要らないこと、本体は`show`で直接引くこと、呼び出し元の検索は`rg -n`を使うことを伝えます。
+Claude CodeはSessionStartの標準出力をClaudeの文脈に加えるので、ClaudeはGrepやReadより先にferrindexを使えます。
+索引がまだ無いときは、`ferrindex update`を切り離して起動し、最初の検索が待つことがある旨を案内に足します。
+gitリポジトリの外や入力の誤りでは何も出力しません。いずれの場合も終了コードは0です。
 
-`ferrindex hook post-tool-use` は、Bash で `ferrindex find` か `ferrindex show` を実行した直後にだけ働きます。
-その出力で問いに答えられるなら、Read や rg で確かめ直さずにそのまま答えるよう、Claude に短く添えます。
-確かめ直すとやり取りが 1 回増え、そのたびに Claude Code は会話の文脈を読み直すので、入力の token が増えます。
-ほかのコマンドと入力の誤りでは何も出力しません。終了コードは常に 0 です。
+`ferrindex hook post-tool-use`は、Bashで`ferrindex find`か`ferrindex show`を実行した直後にだけ働きます。
+その出力で問いに答えられるなら、Readやrgで確かめ直さずにそのまま答えるよう、Claudeに短く添えます。
+確かめ直すとやり取りが1回増え、そのたびにClaude Codeは会話の文脈を読み直すので、入力のtokenが増えます。
+ほかのコマンドと入力の誤りでは何も出力しません。終了コードは常に0です。
 
 ## 試験
 
 `cargo test`で試験を実行します。
-`--precise`の試験は、本物の言語サーバーの代わりに`tests/fixtures/fake_lsp.py`を使います。
+`--precise`の試験は本物の言語サーバーの代わりに`tests/fixtures/fake_lsp.py`を使います。
 環境変数`FERRINDEX_LSP_<言語>`（たとえば`FERRINDEX_LSP_RUST`）に起動コマンドを空白区切りで渡すと、ferrindexはその言語のサーバーとしてそのコマンドを起動します。
 `<言語>`は`RUST`、`GO`、`PYTHON`、`TYPESCRIPT`、`TSX`、`JAVASCRIPT`、`JAVA`、`CSHARP`、`RUBY`、`C`、`CPP`、`SWIFT`、`DART`、`LUA`のどれかです。
 
 ## 撤去
 
-1. `settings.json` から `ferrindex hook session-start` と `ferrindex hook post-tool-use` の項目を消します。
-2. `cargo uninstall ferrindex` を実行します。
-3. 索引のキャッシュディレクトリ `$XDG_CACHE_HOME/ferrindex`（未設定なら `~/.cache/ferrindex`）を削除します。
+1. `settings.json`から`ferrindex hook session-start`と`ferrindex hook post-tool-use`の項目を消します。
+2. `cargo uninstall ferrindex`を実行します。
+3.索引のキャッシュディレクトリ`$XDG_CACHE_HOME/ferrindex`（未設定なら`~/.cache/ferrindex`）を削除します。
 
 ## ライセンス
 
-MIT ライセンスです。全文は `LICENSE` を参照してください。
+MITライセンスです。全文は`LICENSE`を参照してください。
