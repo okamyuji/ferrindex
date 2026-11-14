@@ -193,3 +193,14 @@ fn map_description_for_python_is_the_module_docstring() {
     assert!(lines[0].ends_with("  Tool for x."), "{lines:?}");
     assert!(lines[1].ends_with("  plain comment"), "{lines:?}");
 }
+
+#[test]
+fn map_limit_counts_only_printed_files() {
+    let r = Repo::new();
+    std::fs::write(r.root.join("a.png"), b"\x89PNG\0data").unwrap();
+    r.write("b.rs", "fn b() {}\n");
+    r.write("c.rs", "fn c() {}\n");
+    let run = r.run(&["map", "--limit", "1"]);
+    assert_eq!(run.lines(), ["b.rs  ~2  "]);
+    assert_eq!(run.err, "… 1 more\n");
+}

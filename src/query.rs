@@ -549,7 +549,7 @@ fn map_dir(ctx: &Ctx, dir: Option<&Path>) -> Res<Vec<u8>> {
     Ok(dir_prefix(rel))
 }
 
-/// 読んで数えるのは表示する `limit` 件だけ。
+/// `limit` は表示した件数で数える（バイナリや読めないファイルは数えない）。
 fn map(
     ctx: &Ctx,
     dir: Option<&Path>,
@@ -565,7 +565,12 @@ fn map(
         .map(|(p, _)| p)
         .filter(|p| p.starts_with(&prefix))
         .collect();
-    for path in files.iter().take(limit) {
+    let (mut printed, mut seen) = (0, 0);
+    for path in &files {
+        if printed == limit {
+            break;
+        }
+        seen += 1;
         let rel = Path::new(OsStr::from_bytes(path));
         let Ok(bytes) = fs::read(ctx.root.join(rel)) else {
             continue;
@@ -579,8 +584,9 @@ fn map(
         write!(out, "  ~{}  ", tokens(text.chars().count(), lang))?;
         out.write_all(&escape_control(description(&text, lang).as_bytes()))?;
         out.write_all(b"\n")?;
+        printed += 1;
     }
-    more(err, files.len().saturating_sub(limit))?;
+    more(err, files.len() - seen)?;
     Ok(!files.is_empty())
 }
 
