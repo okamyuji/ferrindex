@@ -5,7 +5,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::slice;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -62,9 +62,12 @@ fn start_failed(path: &Path, e: io::Error) -> LspError {
     LspError::StartFailed(format!("{}: {e}", path.display()))
 }
 
+/// 監視役（`watcher`）は stdin に改行か EOF が来るとサーバーのグループを SIGKILL する。
+/// ferrindex が SIGINT、SIGTERM、SIGKILL、panic のどれで終わっても OS が監視役の stdin を
+/// 閉じるので、サーバーと孫が残らない（std にはシグナルの API が無い）。
 struct Server {
     child: Child,
-    stdin: ChildStdin,
+    watcher: Child,
     inbox: Receiver<Result<Value, LspError>>,
     next_id: u64,
     /// rust-analyzer は読み込みが終わる前の問い合わせに空で答える。読み込み中かを
@@ -88,15 +91,32 @@ impl Server {
                 io::ErrorKind::NotFound => LspError::NotInstalled(spec.name.into()),
                 _ => LspError::StartFailed(e.to_string()),
             })?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            unreachable!("stdin と stdout は piped で開いている");
+        // 監視役はサーバーのグループにも ferrindex のグループにも入れない。前者では macOS の
+        // kill(0) が自分を先に止めて他に届かないことがあり、後者では端末の Ctrl-C で一緒に死ぬ。
+        let watcher = Command::new("sh")
+            .args(["-c", "read x; kill -KILL -$0", &child.id().to_string()])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn();
+        let watcher = match watcher {
+            Ok(watcher) => watcher,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(LspError::StartFailed(e.to_string()));
+            }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            unreachable!("stdout は piped で開いている");
         };
         let (tx, inbox) = mpsc::channel();
         // 読み手を分けるのは、主スレッドが recv_timeout で期限を守るため。
         thread::spawn(move || read_loop(BufReader::new(stdout), &tx));
         Ok(Server {
             child,
-            stdin,
+            watcher,
             inbox,
             next_id: 0,
             loading: false,
@@ -107,8 +127,9 @@ impl Server {
         // shortcut: 書き込みは主スレッドで行う。stdin を読まなくなったサーバーへ大きな didOpen を
         // 送ると期限を越えて止まりうる。実際に起きたら書き込み専用のスレッドに替える。
         let body = msg.to_string();
-        write!(self.stdin, "Content-Length: {}\r\n\r\n{body}", body.len())
-            .and_then(|()| self.stdin.flush())
+        let stdin = self.child.stdin.as_mut().expect("stop の後には送らない");
+        write!(stdin, "Content-Length: {}\r\n\r\n{body}", body.len())
+            .and_then(|()| stdin.flush())
             .map_err(|e| LspError::Protocol(e.to_string()))
     }
 
@@ -275,7 +296,7 @@ impl Server {
         self.next_id += 1;
         let _ = self.send(&json!({"jsonrpc": "2.0", "id": self.next_id, "method": "shutdown"}));
         let _ = self.notify("exit", Value::Null);
-        drop(self.stdin);
+        drop(self.child.stdin.take());
         if !timed_out {
             for _ in 0..GRACE_POLLS {
                 if !matches!(self.child.try_wait(), Ok(None)) {
@@ -284,12 +305,18 @@ impl Server {
                 thread::sleep(POLL);
             }
         }
-        // shortcut: kill コマンドを使う、libc を足す判断がされたら killpg に替える。
-        // 先頭のプロセスが終わっていても、グループに残った孫を止めるために毎回送る。
-        let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{}", self.child.id())])
-            .stderr(Stdio::null())
-            .status();
+    }
+}
+
+impl Drop for Server {
+    /// 先頭のプロセスが終わっていても、グループに残った孫を止めるために毎回監視役に止めさせる。
+    /// EOF でなく改行で起こすのは、macOS に pipe2 が無く、別スレッドが同時に起動した子に
+    /// 書き口が継がれると閉じても EOF にならないため。
+    fn drop(&mut self) {
+        if let Some(mut pipe) = self.watcher.stdin.take() {
+            let _ = pipe.write_all(b"\n");
+        }
+        let _ = self.watcher.wait();
         let _ = self.child.wait();
     }
 }
