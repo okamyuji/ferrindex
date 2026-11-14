@@ -345,7 +345,7 @@ fn precise_falls_back_on_timeout() {
     assert_eq!(o.lines().len(), 2);
     assert_eq!(
         o.err,
-        "ferrindex: rust-analyzer: 期限内に答えがありませんでした。名前一致の結果です（未確定）\n"
+        "ferrindex: --precise: rust-analyzer: 期限内に答えがありませんでした。名前一致の結果です（未確定）\n"
     );
 }
 
@@ -390,7 +390,7 @@ fn precise_queries_every_definition_up_to_5() {
     assert_eq!(o.lines().len(), 3);
     assert_eq!(
         o.err,
-        "ferrindex: targetの定義が6件あり、問い合わせる上限の5件を超えます。名前一致の結果です（未確定）\n"
+        "ferrindex: --precise: targetの定義が6件あり、問い合わせる上限の5件を超えます。名前一致の結果です（未確定）\n"
     );
 }
 
@@ -416,7 +416,7 @@ fn precise_without_definition_falls_back() {
     assert_eq!(o.lines(), ["a.rs:7:5 call in caller_fn\texternal_call();"]);
     assert_eq!(
         o.err,
-        "ferrindex: external_callの定義が見つかりません。名前一致の結果です（未確定）\n"
+        "ferrindex: --precise: external_callの定義が見つかりません。名前一致の結果です（未確定）\n"
     );
 }
 
@@ -478,7 +478,7 @@ fn precise_empty_answer_falls_back() {
     assert_eq!(o.lines().len(), 2);
     assert_eq!(
         o.err,
-        "ferrindex: 言語サーバーの答えが0件でした。名前一致の結果です（未確定）\n"
+        "ferrindex: --precise: 言語サーバーの答えが0件でした。名前一致の結果です（未確定）\n"
     );
 }
 
@@ -502,7 +502,7 @@ fn precise_answer_that_never_settles_falls_back() {
     assert_eq!(o.lines().len(), 2);
     assert_eq!(
         o.err,
-        "ferrindex: rust-analyzer: 答えが期限内に定まりませんでした。名前一致の結果です（未確定）\n"
+        "ferrindex: --precise: rust-analyzer: 答えが期限内に定まりませんでした。名前一致の結果です（未確定）\n"
     );
 }
 
@@ -527,7 +527,7 @@ fn c_without_compile_commands_does_not_start_clangd() {
     );
     assert_eq!(
         o.err,
-        "ferrindex: clangd: compile_commands.jsonが見つかりません。名前一致の結果です（未確定）\n"
+        "ferrindex: --precise: clangd: compile_commands.jsonが見つかりません。名前一致の結果です（未確定）\n"
     );
 
     r.write("compile_commands.json", "[]\n");
@@ -556,7 +556,7 @@ fn precise_answer_missing_a_call_falls_back() {
         );
         assert_eq!(
             o.err,
-            "ferrindex: 言語サーバーが取り込みや別名経由の呼び出しを返していません。名前一致の結果です（未確定）\n",
+            "ferrindex: --precise: 言語サーバーが取り込みや別名経由の呼び出しを返していません。名前一致の結果です（未確定）\n",
             "{cmd}"
         );
     }
@@ -609,4 +609,17 @@ fn markdown_sections_are_not_asked() {
     );
     assert_eq!(o.err, "");
     assert_eq!(o.lines(), ["a.rs:4:5 call in caller_fn\ttarget();"]);
+}
+
+#[test]
+fn markdown_only_definition_reason_names_no_server() {
+    let r = Repo::new();
+    r.write("doc.md", "## lonely\n");
+    r.write("a.rs", "fn x() {\n    lonely();\n}\n");
+    let o = r.run(&["callers", "lonely", "--precise"]);
+    assert_eq!(o.lines().len(), 1);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: lonelyの定義が見つかりません。名前一致の結果です（未確定）\n"
+    );
 }

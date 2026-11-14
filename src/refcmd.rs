@@ -79,7 +79,10 @@ pub(crate) fn run(
         None => found.then(|| "言語サーバーの答えが0件でした".to_string()),
     };
     if let Some(why) = why {
-        writeln!(err, "ferrindex: {why}。名前一致の結果です（未確定）")?;
+        writeln!(
+            err,
+            "ferrindex: --precise: {why}。名前一致の結果です（未確定）"
+        )?;
     }
     err.write_all(&found_err)?;
     out.write_all(&found_out)?;
