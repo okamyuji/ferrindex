@@ -25,6 +25,8 @@ pub struct Ref {
 /// 分類のために見る祖先の段数。入れ子が深い入力でも一つの参照の分類を定数時間にする。
 const CLASSIFY_DEPTH: usize = 3;
 const IMPL_TRAIT_DEPTH: usize = 3;
+/// 分類のときに数えずに飛ばす括弧の数の上限。
+const PAREN_SKIP: usize = 16;
 /// ブロックや無名関数の引数と中身は、外側の call の一部ではない。
 const SCOPE_WORDS: [&str; 5] = ["block", "lambda", "closure", "parameter", "arrow_function"];
 const CALL_WORDS: [&str; 3] = ["call", "invocation", "send"];
@@ -181,7 +183,7 @@ struct Step<'a> {
     last: bool,
 }
 
-const MEMBER_WORDS: [&str; 11] = [
+const MEMBER_WORDS: [&str; 13] = [
     "member",
     "field_expression",
     "selector_expression",
@@ -193,19 +195,34 @@ const MEMBER_WORDS: [&str; 11] = [
     "nested_type_identifier",
     "nested_identifier",
     "qualified",
+    "dot_index_expression",
+    "method_index_expression",
 ];
 
 /// 引数の中の識別子と `obj.method()` の `obj` は呼び出しではない。
 /// `argument` を通ったら打ち切り、メンバー参照では最後の名前だけを先へ進める。
 /// Ruby の `call` は receiver と method を子に持つので、`receiver` フィールドで受け手を見分ける。
+/// Java の `method_invocation` も受け手を `object` フィールドに持つ。
 /// method は `a.b.c` の `.b` も呼び出しなので、種類に `call` を含む規則のまま CALL になる。
 /// Python の基底クラスは `class_definition` の `superclasses` フィールドの argument_list に入る。
+/// Rust の `trait_bounds` は型引数の境界にも使われるので、親が `trait_item` のときだけ継承にする。
+/// 括弧は文脈を変えないので段数に数えない。
 fn classify(ancestors: &[Step], leaf: Step) -> u8 {
     let mut below = leaf;
-    for a in ancestors.iter().rev().take(CLASSIFY_DEPTH) {
+    let (mut depth, mut skipped) = (0, 0);
+    for (i, a) in ancestors.iter().enumerate().rev() {
         if below.field == Some("receiver") {
             return REF_PLAIN;
         }
+        if a.kind == "parenthesized_expression" && skipped < PAREN_SKIP {
+            skipped += 1;
+            below = *a;
+            continue;
+        }
+        if depth == CLASSIFY_DEPTH {
+            break;
+        }
+        depth += 1;
         if a.field == Some("superclasses") {
             return REF_INHERIT;
         }
@@ -216,9 +233,16 @@ fn classify(ancestors: &[Step], leaf: Step) -> u8 {
             return REF_PLAIN;
         }
         if CALL_WORDS.iter().any(|w| a.kind.contains(w)) {
-            return REF_CALL;
+            return if below.field == Some("object") {
+                REF_PLAIN
+            } else {
+                REF_CALL
+            };
         }
-        if INHERIT_WORDS.iter().any(|w| a.kind.contains(w)) {
+        let supertrait = a.kind == "trait_bounds"
+            && i.checked_sub(1)
+                .is_some_and(|p| ancestors[p].kind == "trait_item");
+        if supertrait || INHERIT_WORDS.iter().any(|w| a.kind.contains(w)) {
             return REF_INHERIT;
         }
         if SCOPE_WORDS.iter().any(|w| a.kind.contains(w)) {

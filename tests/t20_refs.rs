@@ -170,11 +170,62 @@ fn non_call_reference_is_plain() {
 
 #[test]
 fn classification_looks_at_most_three_ancestors_up() {
-    // target の 4 段上の call は見ない
-    let near = targets(Lang::JavaScript, b"((target))();\n");
+    // 括弧を除いて target の 4 段上の call は見ない
+    let near = targets(Lang::JavaScript, b"(target || a || b)();\n");
     assert_eq!(near[0].kind, REF_CALL);
-    let far = targets(Lang::JavaScript, b"(((target)))();\n");
+    let far = targets(Lang::JavaScript, b"(target || a || b || c)();\n");
     assert_eq!(far[0].kind, REF_PLAIN);
+}
+
+#[test]
+fn parentheses_around_the_callee_keep_it_a_call() {
+    let cases = [
+        (Lang::JavaScript, "(((target)))();\n"),
+        (Lang::TypeScript, "(((target)))();\n"),
+        (Lang::Python, "(((target)))()\n"),
+        (Lang::Go, "package a\nfunc g() { (((target)))() }\n"),
+        (Lang::Rust, "fn g() { (((target)))(); }\n"),
+        (Lang::C, "void g() { (((target)))(); }\n"),
+        (Lang::Cpp, "void g() { (((target)))(); }\n"),
+        (Lang::Lua, "(((target)))()\n"),
+        (Lang::Dart, "void g() { (((target)))(); }\n"),
+    ];
+    for (lang, src) in cases {
+        let found = targets(lang, src.as_bytes());
+        assert_eq!(found.len(), 1, "{lang:?}");
+        assert_eq!(found[0].kind, REF_CALL, "{lang:?}");
+    }
+}
+
+#[test]
+fn parentheses_do_not_turn_receivers_or_arguments_into_calls() {
+    let js = kinds(
+        Lang::JavaScript,
+        "function g() { (obj).method(); f((target)); if ((cond)) {} }\n",
+    );
+    for (name, kind) in [
+        ("obj", REF_PLAIN),
+        ("method", REF_CALL),
+        ("f", REF_CALL),
+        ("target", REF_PLAIN),
+        ("cond", REF_PLAIN),
+    ] {
+        assert!(js.contains(&(name.into(), kind)), "{name} {js:?}");
+    }
+    let java = kinds(Lang::Java, "class A { void g() { (obj).method(); } }\n");
+    assert!(java.contains(&("obj".into(), REF_PLAIN)), "{java:?}");
+}
+
+#[test]
+fn parentheses_are_skipped_only_up_to_a_bound() {
+    // 16 段までは数えずに飛ばし、残りは分類の 3 段に数える
+    let kind = |n: usize| {
+        let src = format!("{}target{}();\n", "(".repeat(n), ")".repeat(n));
+        targets(Lang::JavaScript, src.as_bytes())[0].kind
+    };
+    assert_eq!(kind(18), REF_CALL);
+    assert_eq!(kind(19), REF_PLAIN);
+    assert_eq!(kind(1000), REF_PLAIN);
 }
 
 #[test]
@@ -257,6 +308,19 @@ fn receiver_is_plain_and_member_name_is_call() {
         (Lang::Cpp, "void g() { obj.method(); a.b.c(); p->m(); }\n"),
         (Lang::Ruby, "def g\n  obj.method()\n  a.b.c()\nend\n"),
         (Lang::Rust, "fn g() { obj.method(); a.b.c(); m::f(); }\n"),
+        (
+            Lang::Java,
+            "class A { void g() { obj.method(); a.b.c(); } }\n",
+        ),
+        (Lang::Lua, "function g() obj.method() a.b.c() end\n"),
+        (Lang::Lua, "function g() obj:method() a.b:c() end\n"),
+        (
+            Lang::CSharp,
+            "class A { void g() { obj.method(); a.b.c(); } }\n",
+        ),
+        (Lang::TypeScript, "function g() { obj.method(); a.b.c(); }\n"),
+        (Lang::Swift, "func g() { obj.method(); a.b.c() }\n"),
+        (Lang::Dart, "void g() { obj.method(); a.b.c(); }\n"),
     ];
     for (lang, src) in cases {
         let k = kinds(lang, src);
@@ -346,3 +410,34 @@ fn identifiers_inside_blocks_and_callbacks_are_not_calls() {
         }
     }
 }
+
+#[test]
+fn java_receivers_behind_this_are_plain() {
+    let k = kinds(Lang::Java, "class A { void g() { this.x.baz(); } }\n");
+    assert!(k.contains(&("x".into(), REF_PLAIN)), "{k:?}");
+    assert!(k.contains(&("baz".into(), REF_CALL)), "{k:?}");
+}
+
+#[test]
+fn rust_supertraits_are_inherit_references_but_generic_bounds_are_not() {
+    let src = "trait Base {}\n\
+               trait Child: Base + a::Other + b::c::Deep<T> {}\n\
+               fn g<T: Base>(t: T) where T: Base {}\n\
+               impl<T: Base> X for T {}\n";
+    let refs = refs_of(Lang::Rust, src.as_bytes());
+    let inherit: Vec<(&str, u32, Option<&str>)> = refs
+        .iter()
+        .filter(|r| r.kind == REF_INHERIT)
+        .map(|r| (r.name.as_str(), r.line, r.container.as_deref()))
+        .collect();
+    assert_eq!(
+        inherit,
+        [
+            ("Base", 2, Some("Child")),
+            ("Other", 2, Some("Child")),
+            ("Deep", 2, Some("Child")),
+            ("X", 4, Some("T")),
+        ]
+    );
+}
+
