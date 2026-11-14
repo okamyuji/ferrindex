@@ -1021,8 +1021,36 @@ fn refs_beyond_the_limit_are_counted_without_rendering() {
         took
     };
     time(1000);
-    let small = time(5000);
-    let large = time(20000);
+    // 機械の負荷の揺れで偽の失敗を出さないよう、3回の最小値で比べる
+    let best = |n| (0..3).map(|_| time(n)).min().unwrap();
+    let small = best(5000);
+    let large = best(20000);
+    // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
+    assert!(large < small * 8, "{small:?} -> {large:?}");
+}
+
+/// 同名の型が1ファイルに大量にあっても、supers は定義ごとに全参照を走査しない。
+#[test]
+fn supers_of_many_same_named_types_take_linear_time() {
+    let time = |n: usize| {
+        let r = Repo::new();
+        let mods: String = (0..n)
+            .map(|i| format!("mod m{i}{{struct A;impl super::T for A{{}}}}\n"))
+            .collect();
+        r.write("a.rs", &format!("trait T{{}}\n{mods}"));
+        assert_eq!(r.run(&["update"]).code, 0);
+        let start = std::time::Instant::now();
+        let o = r.run(&["supers", "A", "--limit", "1"]);
+        let took = start.elapsed();
+        assert_eq!(o.lines().len(), 1);
+        assert_eq!(o.err, format!("… {} more\n", n - 1));
+        took
+    };
+    time(500);
+    // 機械の負荷の揺れで偽の失敗を出さないよう、3回の最小値で比べる
+    let best = |n| (0..3).map(|_| time(n)).min().unwrap();
+    let small = best(2500);
+    let large = best(10000);
     // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
     assert!(large < small * 8, "{small:?} -> {large:?}");
 }

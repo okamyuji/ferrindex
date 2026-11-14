@@ -375,7 +375,8 @@ fn bases(ctx: &Ctx, defs: &[Found]) -> Res<Vec<String>> {
         let Some((_, _, refs)) = parse(ctx, Path::new(OsStr::from_bytes(&d.path)))? else {
             continue;
         };
-        out.extend(refs.into_iter().filter(|r| inherits(r, d)).map(|r| r.name));
+        let owners = Owners::of([d]);
+        out.extend(refs.into_iter().filter(|r| owners.owns(r)).map(|r| r.name));
     }
     Ok(out)
 }
@@ -554,17 +555,38 @@ fn indexed(
     emit(out, err, &lines, found.len())
 }
 
-/// `d` の基底を指す継承参照か。囲む定義から決まる参照は定義の位置で比べ、同名の入れ子の型を
-/// 区別する。`impl Trait for Type` の参照は型の名前で比べる。
-fn inherits(r: &Ref, d: &Found) -> bool {
-    r.kind == REF_INHERIT
-        && match r.container_at {
-            Some(at) => at == (d.line, d.col),
-            None => r.container.as_deref().map(str::as_bytes) == Some(&d.name),
+/// 定義の基底を指す継承参照を見分ける。囲む定義から決まる参照は定義の位置で比べ、同名の入れ子の
+/// 型を区別する。`impl Trait for Type` の参照は型の名前で比べる。参照ごとに定義を総当たりすると、
+/// 同名の型が大量にあるファイルで定義数×参照数になるので、集合で引く。
+struct Owners<'a> {
+    at: HashSet<(u32, u32)>,
+    names: HashSet<&'a [u8]>,
+}
+
+impl<'a> Owners<'a> {
+    fn of(defs: impl IntoIterator<Item = &'a Found>) -> Self {
+        let (mut at, mut names) = (HashSet::new(), HashSet::new());
+        for d in defs {
+            at.insert((d.line, d.col));
+            names.insert(d.name.as_slice());
         }
+        Owners { at, names }
+    }
+
+    fn owns(&self, r: &Ref) -> bool {
+        r.kind == REF_INHERIT
+            && match r.container_at {
+                Some(at) => self.at.contains(&at),
+                None => r
+                    .container
+                    .as_deref()
+                    .is_some_and(|c| self.names.contains(c.as_bytes())),
+            }
+    }
 }
 
 /// 定義のファイルを今の内容で取り直し、定義の名前を囲みに持つ継承参照を出す。
+/// 同じファイルの同名の型は同じ `impl` の参照を共有するので、参照はファイルごとに一度だけ見る。
 fn supers(
     ctx: &Ctx,
     defs: Vec<Found>,
@@ -572,23 +594,26 @@ fn supers(
     out: &mut impl Write,
     err: &mut impl Write,
 ) -> Res {
-    let mut parsed: HashMap<&[u8], Option<Parsed>> = HashMap::new();
-    let mut seen = HashSet::new();
-    let (mut lines, mut total) = (Vec::new(), 0);
+    // 出力の順を定義の順に保つため、ファイルの並びは初めて現れた順にする。
+    let mut by_file: Vec<(&[u8], Vec<&Found>)> = Vec::new();
+    let mut slot: HashMap<&[u8], usize> = HashMap::new();
     for d in &defs {
-        let Some((src, _, refs)) = cached(&mut parsed, &d.path, || {
-            parse(ctx, Path::new(OsStr::from_bytes(&d.path)))
-        })?
-        .as_ref() else {
+        let i = *slot.entry(&d.path).or_insert_with(|| {
+            by_file.push((&d.path, Vec::new()));
+            by_file.len() - 1
+        });
+        by_file[i].1.push(d);
+    }
+    let (mut lines, mut total) = (Vec::new(), 0);
+    for (path, ds) in by_file {
+        let Some((src, _, refs)) = parse(ctx, Path::new(OsStr::from_bytes(path)))? else {
             continue;
         };
-        for r in refs {
-            // 同じファイルの同名の型は同じ `impl` の参照を共有する。一度だけ出す。
-            if inherits(r, d) && seen.insert((&d.path, r.line, r.col)) {
-                total += 1;
-                if lines.len() < limit {
-                    lines.push(render(ctx, &Hit::new(&d.path, r), Some(src)));
-                }
+        let owners = Owners::of(ds);
+        for r in refs.iter().filter(|r| owners.owns(r)) {
+            total += 1;
+            if lines.len() < limit {
+                lines.push(render(ctx, &Hit::new(path, r), Some(&src)));
             }
         }
     }
