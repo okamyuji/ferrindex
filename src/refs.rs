@@ -148,7 +148,7 @@ fn impl_type_name(item: Node, src: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `a::b::Tr<T>` の `Tr`。これ以外の型（参照、タプルなど）は名前を持たない。
+/// `a::b::Tr<T>` の `Tr`。これ以外の型（タプルなど）は名前を持たない。
 fn last_type_name(mut node: Node) -> Option<Node> {
     loop {
         node = match node.kind() {
@@ -181,7 +181,7 @@ struct Step<'a> {
     last: bool,
 }
 
-const MEMBER_WORDS: [&str; 9] = [
+const MEMBER_WORDS: [&str; 11] = [
     "member",
     "field_expression",
     "selector_expression",
@@ -190,6 +190,8 @@ const MEMBER_WORDS: [&str; 9] = [
     "scoped_identifier",
     "scoped_type_identifier",
     "scope_resolution",
+    "nested_type_identifier",
+    "nested_identifier",
     "qualified",
 ];
 

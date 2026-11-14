@@ -76,3 +76,23 @@ fn rust_trait_arguments_and_path_segments_stay_plain() {
         ]
     );
 }
+
+#[test]
+fn typescript_qualified_bases_inherit_only_the_last_name() {
+    let src = "class F extends ns.Base implements I1, ns.a.I2 {}\ninterface J extends K, ns.L {}\n";
+    let inherit: Vec<(String, u8)> = names(Lang::TypeScript, src);
+    assert_eq!(
+        inherit,
+        [
+            ("ns".into(), REF_PLAIN),
+            ("Base".into(), REF_INHERIT),
+            ("I1".into(), REF_INHERIT),
+            ("ns".into(), REF_PLAIN),
+            ("a".into(), REF_PLAIN),
+            ("I2".into(), REF_INHERIT),
+            ("K".into(), REF_INHERIT),
+            ("ns".into(), REF_PLAIN),
+            ("L".into(), REF_INHERIT),
+        ]
+    );
+}
