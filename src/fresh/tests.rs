@@ -234,10 +234,10 @@ fn vanished_between_scan_and_read_is_skipped() {
         mtime_ns: 1,
         size: 1,
     };
-    assert_eq!(entry_for(&e.root, &ghost, u64::MAX), None);
+    assert_eq!(entry_for(&e.root, &ghost, u64::MAX).unwrap(), None);
     put(&e, "real.rs", "fn real() {}\n");
     let real = &scan(&e.root).unwrap()[0];
-    assert!(entry_for(&e.root, real, u64::MAX).is_some());
+    assert!(entry_for(&e.root, real, u64::MAX).unwrap().is_some());
 }
 
 #[test]
@@ -573,4 +573,20 @@ fn unreadable_directory_fails_the_refresh_and_keeps_the_index() {
     fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(matches!(err, Err(Error::Io(_))));
     assert_eq!(found(&run(&e), "hidden").len(), 1);
+}
+
+#[test]
+fn unreadable_file_fails_the_refresh_and_keeps_the_index() {
+    use std::os::unix::fs::PermissionsExt;
+    let e = env();
+    put(&e, "a.rs", "fn top() {}\n");
+    put(&e, "b.rs", "fn secret() {}\n");
+    assert_eq!(found(&run(&e), "secret").len(), 1);
+    put(&e, "b.rs", "fn secret() {}\nfn more() {}\n");
+    let b = e.root.join("b.rs");
+    fs::set_permissions(&b, fs::Permissions::from_mode(0o000)).unwrap();
+    let err = refresh_in(&e.root, &e.cache, Duration::from_secs(5));
+    fs::set_permissions(&b, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(matches!(err, Err(Error::Io(_))));
+    assert_eq!(found(&run(&e), "secret").len(), 1);
 }

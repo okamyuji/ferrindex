@@ -134,7 +134,7 @@ fn remove_if_exists(path: &Path) -> io::Result<()> {
 /// 破損・欠落・抽出器の不一致のときは全件を作り直す。古い結果は返さない。
 fn rebuild(root: &Path, dir: &Path, scanned: &[Scanned], start: u64) -> io::Result<View> {
     let refs: Vec<&Scanned> = scanned.iter().collect();
-    let entries: Vec<FileEntry> = parse_all(root, &refs, start)
+    let entries: Vec<FileEntry> = parse_all(root, &refs, start)?
         .into_iter()
         .flatten()
         .collect();
@@ -186,7 +186,7 @@ fn incremental(
         .iter()
         .filter(|s| known(&s.path) != Some((s.mtime_ns, s.size)))
         .collect();
-    let parsed = parse_all(root, &changed, start);
+    let parsed = parse_all(root, &changed, start)?;
 
     let mut present: std::collections::BTreeSet<&[u8]> =
         scanned.iter().map(|s| s.path.as_slice()).collect();
@@ -274,14 +274,19 @@ fn stamp_for(s: &Scanned, start: u64) -> (u64, u64) {
     }
 }
 
-/// 走査から読み出しまでの間に消えたファイルは `None`。
-fn entry_for(root: &Path, s: &Scanned, start: u64) -> Option<FileEntry> {
+/// 走査から読み出しまでの間に消えたファイルは `None`。権限などの読み出し失敗は `Err`
+/// （`None` にすると、読めないだけのファイルが削除として索引に残る）。
+fn entry_for(root: &Path, s: &Scanned, start: u64) -> io::Result<Option<FileEntry>> {
     let (mtime_ns, size) = stamp_for(s, start);
     let rel = Path::new(OsStr::from_bytes(&s.path));
     let (lang, defs) = match lang_of(rel) {
         None => (LANG_BINARY, Vec::new()),
         Some(lang) => {
-            let bytes = fs::read(root.join(rel)).ok()?;
+            let bytes = match fs::read(root.join(rel)) {
+                Ok(b) => b,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e),
+            };
             if is_binary(&bytes) {
                 (LANG_BINARY, Vec::new())
             } else {
@@ -289,16 +294,16 @@ fn entry_for(root: &Path, s: &Scanned, start: u64) -> Option<FileEntry> {
             }
         }
     };
-    Some(FileEntry {
+    Ok(Some(FileEntry {
         path: s.path.clone(),
         mtime_ns,
         size,
         lang,
         defs,
-    })
+    }))
 }
 
-fn parse_all(root: &Path, items: &[&Scanned], start: u64) -> Vec<Option<FileEntry>> {
+fn parse_all(root: &Path, items: &[&Scanned], start: u64) -> io::Result<Vec<Option<FileEntry>>> {
     let threads = thread::available_parallelism().map_or(1, usize::from);
     let chunk = items.len().div_ceil(threads).max(1);
     thread::scope(|sc| {
@@ -308,14 +313,15 @@ fn parse_all(root: &Path, items: &[&Scanned], start: u64) -> Vec<Option<FileEntr
                 sc.spawn(move || {
                     c.iter()
                         .map(|s| entry_for(root, s, start))
-                        .collect::<Vec<_>>()
+                        .collect::<io::Result<Vec<_>>>()
                 })
             })
             .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("parse thread panicked"))
-            .collect()
+        let mut all = Vec::new();
+        for h in handles {
+            all.extend(h.join().expect("parse thread panicked")?);
+        }
+        Ok(all)
     })
 }
 
