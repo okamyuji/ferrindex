@@ -29,7 +29,7 @@ cargo install --path .
 - `ferrindex show <name> [--limit N]`定義の本体を表示します。
 - `ferrindex map [<dir>] [--limit N]`ファイルごとの概要を一覧します。
 - `ferrindex refs <name> [--limit N] [--precise]`名前を参照しているコードの位置を一覧します。コメントと文字列の中は数えません。`refs`は名前を含むファイルを検索のたびに読んで解析します。OSのファイルキャッシュが冷えた最初の実行は遅く、大きなリポジトリでは数十秒かかることがあります。
-- `ferrindex callers <name> [--limit N] [--precise]`名前を呼び出している位置を一覧します。
+- `ferrindex callers <name> [--limit N] [--precise]`名前を呼び出している位置を一覧します。Rubyで括弧を付けずに書いた呼び出し（`helper`だけの行）は呼び出しと数えず、`refs`に`ref`として出ます。
 - `ferrindex impls <name> [--limit N] [--precise]`名前の型を継承、実装している位置を一覧します。
 - `ferrindex supers <name> [--limit N] [--precise]`名前の型が継承、実装している型を一覧します。
 
@@ -90,6 +90,7 @@ src/cli/alias.rs  ~2806  CLI aliases (`awscli/alias.py`): the `[toplevel]` alias
 - C、C++のリポジトリの根に`compile_commands.json`がありません。clangdはこのファイルが無いと開いたファイルしか見ないので、ferrindexはclangdを起動しません。
 - サーバーが問い合わせの種類に対応していません。solargraphとlua-language-serverは呼び出しの階層（callHierarchy）に対応しないので、`callers --precise`はいつも名前一致に戻ります。
 
+`refs --precise`は、サーバーが返した定義そのものの位置を答えから除きます。
 呼び出しと継承のどちらでもない参照は、名前一致との突き合わせをしません。
 `refs`が返す型の名前の参照などがこれに当たります。
 サーバーのプロジェクトの外にあるファイルの参照は、答えに入りません。

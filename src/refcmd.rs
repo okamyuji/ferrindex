@@ -207,6 +207,17 @@ fn precise_lines(
     // `<根>/../x` も `strip_prefix` を通るので、`..` を含む位置は根の外として捨てる。
     found.retain(|l| inside(&root, &l.path));
     all.retain(|l| inside(&root, &l.path));
+    if kind == RefKind::Refs {
+        // solargraph は includeDeclaration: false でも定義の名前の位置を返す。
+        found.retain(|l| {
+            !asked.iter().any(|d| {
+                (l.line, l.col) == (d.line, d.col)
+                    && l.path
+                        .strip_prefix(&root)
+                        .is_ok_and(|r| r.as_os_str().as_bytes() == d.path)
+            })
+        });
+    }
     found.sort();
     found.dedup();
     if checks_calls

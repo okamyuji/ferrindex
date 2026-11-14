@@ -471,6 +471,36 @@ fn results_climbing_out_of_root_with_dot_dot_are_dropped() {
 }
 
 #[test]
+fn refs_drop_the_declaration_the_server_returns() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    // solargraph は includeDeclaration: false でも定義の名前の位置（ここでは a.rs の 2行4列）を返す。
+    let o = precise(
+        &r,
+        &[(
+            "FAKE_REFS",
+            r#"[["a.rs", 1, 3], ["c.rs", 1, 12], ["a.rs", 3, 4]]"#,
+        )],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "c.rs:2:13 ref in other\tlet g = target;",
+        ]
+    );
+    // 定義だけの答えは0件と同じに扱う。
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["a.rs", 1, 3]]"#)],
+        &["refs", "target", "--precise"],
+    );
+    assert!(o.err.contains("言語サーバーの答えが0件でした"), "{}", o.err);
+}
+
+#[test]
 fn precise_belongs_to_the_reference_commands() {
     let r = repo();
     let o = r.run(&["find", "target", "--precise"]);
