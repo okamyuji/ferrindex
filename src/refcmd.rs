@@ -171,9 +171,13 @@ fn precise_lines(
     found.sort();
     found.dedup();
     let root = canonical_root(ctx);
-    if defs.len() == 1
+    // 修飾の無い名前の呼び出しは、どれも索引にあるどれかの定義を指すはず。修飾した名前は
+    // 同名の別の定義を指す呼び出しと見分けられないので確かめない。
+    let checks_calls =
+        matches!(kind, RefKind::Refs | RefKind::Callers) && last_segment(term) == term;
+    if checks_calls
         && !found.is_empty()
-        && misses_a_call(view, &last_segment(term), &root, &found).map_err(|c| corrupt(c, ctx))?
+        && misses_a_call(view, term, &root, &found).map_err(|c| corrupt(c, ctx))?
     {
         return Ok(Err(
             "言語サーバーが取り込みや別名経由の呼び出しを返していません".to_string(),
@@ -192,8 +196,8 @@ fn canonical_root(ctx: &Ctx) -> PathBuf {
     fs::canonicalize(&ctx.root).unwrap_or_else(|_| ctx.root.clone())
 }
 
-/// 定義が1つなら、名前一致の呼び出しはどれもその定義への呼び出しのはず。答えに無い呼び出しが
-/// あれば、サーバーは `require` の分割代入や別名を経た呼び出しを追えていない。
+/// 名前一致の呼び出しに、全定義の答えを合わせたものに無い位置があるか。あれば、サーバーは
+/// `require` の分割代入、別名、型を推論できない受け手を経た呼び出しを追えていない。
 fn misses_a_call(
     view: &View,
     name: &str,

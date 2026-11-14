@@ -301,30 +301,35 @@ fn precise_uses_the_server_result() {
 
 #[test]
 fn precise_maps_each_command_to_its_method() {
-    let r = repo();
-    // 定義が2つあれば、名前一致の呼び出しが答えに無くてもサーバーの答えを採る。
-    r.write("z.rs", "fn target() {}\n");
-    r.write("impl.rs", "mod m {\n\n\n  fn imp() {}\n}\n");
-    r.write(
+    // callers の答えは caller.rs の2か所だけなので、名前一致の呼び出しもその2か所にする。
+    let only = Repo::new();
+    only.write("t.rs", "fn target() {}\n");
+    only.write(
         "caller.rs",
         "fn g() {\n\n\n\n target();\n\n  target();\n}\n",
     );
+    let o = precise(&only, &[], &["callers", "target", "--precise"]);
+    assert_eq!(o.err, "");
+    assert_eq!(
+        o.lines(),
+        [
+            "caller.rs:5:2 call in g\ttarget();",
+            "caller.rs:7:3 call in g\ttarget();",
+        ]
+    );
+
+    // impls と supers は呼び出しを答えないので、答えに無い a.rs の呼び出しで名前一致に戻らない。
+    let r = repo();
+    r.write("impl.rs", "mod m {\n\n\n  fn imp() {}\n}\n");
     r.write("base.rs", "mod n {\n    fn base() {}\n}\n");
     let cases = [
-        (
-            "callers",
-            vec![
-                "caller.rs:5:2 call in g\ttarget();",
-                "caller.rs:7:3 call in g\ttarget();",
-            ],
-        ),
-        ("impls", vec!["impl.rs:4:6 inherit in m\tfn imp() {}"]),
-        ("supers", vec!["base.rs:2:8 inherit in n\tfn base() {}"]),
+        ("impls", "impl.rs:4:6 inherit in m\tfn imp() {}"),
+        ("supers", "base.rs:2:8 inherit in n\tfn base() {}"),
     ];
     for (cmd, want) in cases {
         let o = precise(&r, &[], &[cmd, "target", "--precise"]);
-        assert_eq!(o.code, 0, "{cmd}: {}", o.err);
-        assert_eq!(o.lines(), want, "{cmd}");
+        assert_eq!(o.err, "", "{cmd}");
+        assert_eq!(o.lines(), [want], "{cmd}");
     }
 }
 
@@ -398,7 +403,7 @@ fn precise_with_five_definitions_asks_the_server() {
     }
     let o = precise(
         &r,
-        &[("FAKE_REFS", r#"[["c.rs", 1, 12]]"#)],
+        &[("FAKE_REFS", r#"[["c.rs", 1, 12], ["a.rs", 3, 4]]"#)],
         &["refs", "target", "--precise"],
     );
     assert_eq!(o.err, "");
@@ -532,9 +537,11 @@ fn c_without_compile_commands_does_not_start_clangd() {
 }
 
 #[test]
-fn precise_answer_missing_a_call_of_the_only_definition_falls_back() {
+fn precise_answer_missing_a_call_falls_back() {
     let r = repo();
     r.write("c.rs", C_SRC);
+    // 定義が2つでも、修飾の無い名前の呼び出しはどれかの定義を指すので、答えの和集合に無ければ戻る。
+    r.write("z.rs", "fn target() {}\n");
     // 答えに a.rs:4:5 の呼び出しが無い（別名や取り込み経由の呼び出しを返さないサーバー）。
     for cmd in ["refs", "callers"] {
         let o = precise(
@@ -553,4 +560,18 @@ fn precise_answer_missing_a_call_of_the_only_definition_falls_back() {
             "{cmd}"
         );
     }
+}
+
+#[test]
+fn qualified_name_keeps_the_answer_without_the_call_check() {
+    let r = Repo::new();
+    r.write("s.rs", common::SAMPLE);
+    r.write("u.rs", "fn u(x: Foo) {\n    x.bar();\n}\n");
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["s.rs", 6, 7]]"#)],
+        &["refs", "Baz.bar", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines().len(), 1, "{:?}", o.lines());
 }
