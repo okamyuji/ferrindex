@@ -145,6 +145,7 @@ const MEMBER_WORDS: [&str; 7] = [
 /// 引数の中の識別子と `obj.method()` の `obj` は呼び出しではない。
 /// `argument` を通ったら打ち切り、メンバー参照では最後の名前だけを先へ進める。
 /// Ruby の `call` は receiver と method を子に持つので、`receiver` フィールドで受け手を見分ける。
+/// method は `a.b.c` の `.b` も呼び出しなので、種類に `call` を含む規則のまま CALL になる。
 /// Python の基底クラスは `class_definition` の `superclasses` フィールドの argument_list に入る。
 fn classify(ancestors: &[Step], leaf: Step) -> u8 {
     let mut below = leaf;
@@ -162,11 +163,7 @@ fn classify(ancestors: &[Step], leaf: Step) -> u8 {
             return REF_PLAIN;
         }
         if CALL_WORDS.iter().any(|w| a.kind.contains(w)) {
-            return if a.field == Some("receiver") {
-                REF_PLAIN
-            } else {
-                REF_CALL
-            };
+            return REF_CALL;
         }
         if INHERIT_WORDS.iter().any(|w| a.kind.contains(w)) {
             return REF_INHERIT;

@@ -264,7 +264,13 @@ fn receiver_is_plain_and_member_name_is_call() {
         assert_eq!(kind_of("obj"), REF_PLAIN, "{lang:?} obj");
         assert_eq!(kind_of("method"), REF_CALL, "{lang:?} method");
         assert_eq!(kind_of("a"), REF_PLAIN, "{lang:?} a");
-        assert_eq!(kind_of("b"), REF_PLAIN, "{lang:?} b");
+        // Ruby の `.b` はメソッド呼び出しそのもの
+        let b = if lang == Lang::Ruby {
+            REF_CALL
+        } else {
+            REF_PLAIN
+        };
+        assert_eq!(kind_of("b"), b, "{lang:?} b");
         assert_eq!(kind_of("c"), REF_CALL, "{lang:?} c");
     }
 }
@@ -285,4 +291,19 @@ fn dart_local_function_is_a_definition_and_a_container() {
     assert!(!refs.iter().any(|r| r.name == "nested"));
     let deep = refs.iter().find(|r| r.name == "deep").unwrap();
     assert_eq!(deep.container.as_deref(), Some("nested"));
+}
+
+#[test]
+fn ruby_method_names_in_chains_are_calls() {
+    for src in [
+        "def g\n  a.b().c()\nend\n",
+        "def g\n  a.b.c()\nend\n",
+        "def g\n  a.b.c\nend\n",
+    ] {
+        let k = kinds(Lang::Ruby, src);
+        let kind_of = |n: &str| k.iter().find(|(m, _)| m == n).unwrap().1;
+        assert_eq!(kind_of("a"), REF_PLAIN, "{src}");
+        assert_eq!(kind_of("b"), REF_CALL, "{src}");
+        assert_eq!(kind_of("c"), REF_CALL, "{src}");
+    }
 }
