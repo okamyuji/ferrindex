@@ -88,12 +88,17 @@ fn assert_guidance(text: &str) {
         "ferrindex files <部分文字列>",
         "各行に定義の行が付く",
         "find と Read ではなく `ferrindex show <名前>` を直接",
-        "呼び出し元と使用箇所は `rg -n`",
-        "終了コード 3",
-        "rg -n",
+        "呼び出し元は `ferrindex callers <名前>`",
+        "使用箇所は `ferrindex refs <名前>`",
+        "その位置を囲む定義が付きます",
+        "rg、Grep、Read で確かめ直さないでください",
+        "終了コード 3 のときは `rg -n` を使ってください",
+        "`Class.method` と書いても修飾では絞れません",
+        "正確な範囲が要るときは `--precise` を付けてください",
     ] {
         assert!(text.contains(needle), "missing {needle}: {text}");
     }
+    assert!(!text.contains("trust"), "has trust: {text}");
 }
 
 #[test]
@@ -192,9 +197,11 @@ fn context_of(h: &Hook) -> Option<String> {
 }
 
 #[test]
-fn post_tool_use_adds_answer_now_note_after_find_and_show() {
+fn post_tool_use_adds_answer_now_note_after_lookups() {
     for cmd in [
         "ferrindex find SyncPod",
+        "ferrindex callers syncPod",
+        "ferrindex refs Pod --limit 5",
         "ferrindex show Kubelet.SyncPod",
         "cd sub && ferrindex find a",
         "ferrindex find foo | head -3",
@@ -213,6 +220,7 @@ fn post_tool_use_is_silent_for_other_commands() {
         "echo ferrindex find foo",
         "ferrindex outline a.rs",
         "ferrindex files main",
+        "ferrindex impls Shape",
         "cargo test",
     ] {
         let h = post(cmd);

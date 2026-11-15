@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt, fs,
     io::{self, Write},
     path::Path,
@@ -11,6 +11,7 @@ use memmap2::Mmap;
 
 use crate::codec::{Corrupt, Row, decode_rows, encode_rows, key_by_rank};
 use crate::extract::Def;
+use crate::intern::{PackedRef, intern, names_of};
 use crate::lang::extra_queries;
 use crate::store::write_atomic;
 
@@ -19,8 +20,8 @@ pub const LANG_BINARY: u8 = 255;
 
 const MAGIC: &[u8; 8] = b"FERRIDX\0";
 /// 抽出結果の意味が変わる変更（クエリ、kind の割り当て、行列の数え方）では必ず上げる。
-const FORMAT_VERSION: u32 = 3;
-const SECTION_COUNT: usize = 5;
+const FORMAT_VERSION: u32 = 13;
+const SECTION_COUNT: usize = 7;
 /// 区画ごとに 長さ u64 と CRC32C u32。位置は長さの総和で決まる。
 const SECTION_ENTRY_LEN: usize = 12;
 const HEADER_LEN: usize = 8 + 4 + 8 + SECTION_COUNT * SECTION_ENTRY_LEN + 4;
@@ -35,6 +36,7 @@ pub struct FileEntry {
     /// `LANG_DELETED` と `LANG_BINARY` は予約。
     pub lang: u8,
     pub defs: Vec<Def>,
+    pub refs: Vec<PackedRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +138,15 @@ fn sections(files: &[FileEntry]) -> io::Result<[Vec<u8>; SECTION_COUNT]> {
     }
     to_u32(order.len())?;
 
+    let used: Vec<u32> = order
+        .iter()
+        .flat_map(|f| &f.refs)
+        .flat_map(|r| [Some(r.name), r.container.checked_sub(1)])
+        .flatten()
+        .collect::<BTreeSet<u32>>()
+        .into_iter()
+        .collect();
+    let ref_names = names_of(&used);
     let mut by_name: BTreeMap<&[u8], Vec<Row>> = BTreeMap::new();
     for d in order.iter().flat_map(|f| &f.defs) {
         by_name.entry(d.name.as_bytes()).or_default();
@@ -143,35 +154,51 @@ fn sections(files: &[FileEntry]) -> io::Result<[Vec<u8>; SECTION_COUNT]> {
             by_name.entry(c.as_bytes()).or_default();
         }
     }
+    for n in &ref_names {
+        by_name.entry(n.as_bytes()).or_default();
+    }
     let names: Vec<&[u8]> = by_name.keys().copied().collect();
     to_u32(names.len())?;
+    let rank_of = |n: &[u8]| {
+        // 直前の走査で全ての名前と包含元を入れてあるので必ず見つかる
+        names.binary_search(&n).expect("name was inserted") as u32
+    };
+    let mut rank_of_id = vec![0u32; used.last().map_or(0, |&m| m as usize + 1)];
+    for (&id, n) in used.iter().zip(&ref_names) {
+        rank_of_id[id as usize] = rank_of(n.as_bytes());
+    }
+    let mut by_ref: Vec<Vec<Row>> = vec![Vec::new(); names.len()];
     for (id, f) in order.iter().enumerate() {
+        let file = id as u32;
         for d in &f.defs {
-            let container = d.container.as_ref().map_or(0, |c| {
-                // 直前の走査で全ての包含元を入れてあるので必ず見つかる
-                names
-                    .binary_search(&c.as_bytes())
-                    .expect("container was inserted") as u32
-                    + 1
-            });
             let row = Row {
-                file: id as u32,
+                file,
                 line: d.line,
                 col: d.col,
                 kind: d.kind,
-                container,
+                container: d
+                    .container
+                    .as_ref()
+                    .map_or(0, |c| rank_of(c.as_bytes()) + 1),
             };
             by_name.entry(d.name.as_bytes()).or_default().push(row);
         }
+        for r in &f.refs {
+            by_ref[rank_of_id[r.name as usize] as usize].push(Row {
+                file,
+                line: r.line,
+                col: r.col,
+                kind: r.kind,
+                container: r
+                    .container
+                    .checked_sub(1)
+                    .map_or(0, |c| rank_of_id[c as usize] + 1),
+            });
+        }
     }
 
-    let (mut offsets, mut postings) = (Vec::new(), Vec::new());
-    for rows in by_name.values_mut() {
-        rows.sort_by_key(|r| (r.file, r.line, r.col));
-        offsets.extend_from_slice(&(postings.len() as u64).to_le_bytes());
-        encode_rows(&mut postings, rows);
-    }
-    offsets.extend_from_slice(&(postings.len() as u64).to_le_bytes());
+    let (offsets, postings) = posting_sections(by_name.values_mut());
+    let (ref_offsets, ref_postings) = posting_sections(by_ref.iter_mut());
 
     let stamps = order
         .iter()
@@ -190,7 +217,27 @@ fn sections(files: &[FileEntry]) -> io::Result<[Vec<u8>; SECTION_COUNT]> {
             .map(|(f, i)| (f.path.as_slice(), i)),
     )?;
     let names = build_fst(names.iter().copied().zip(0u64..))?;
-    Ok([paths, names, offsets, postings, stamps])
+    Ok([
+        paths,
+        names,
+        offsets,
+        postings,
+        stamps,
+        ref_offsets,
+        ref_postings,
+    ])
+}
+
+/// 名前の順位順に並べた行の列から、オフセット表と posting を作る。
+fn posting_sections<'a>(lists: impl Iterator<Item = &'a mut Vec<Row>>) -> (Vec<u8>, Vec<u8>) {
+    let (mut offsets, mut postings) = (Vec::new(), Vec::new());
+    for rows in lists {
+        rows.sort_by_key(|r| (r.file, r.line, r.col));
+        offsets.extend_from_slice(&(postings.len() as u64).to_le_bytes());
+        encode_rows(&mut postings, rows);
+    }
+    offsets.extend_from_slice(&(postings.len() as u64).to_le_bytes());
+    (offsets, postings)
 }
 
 fn assemble(fp: u64, version: u32, s: &[Vec<u8>; SECTION_COUNT]) -> Vec<u8> {
@@ -244,6 +291,8 @@ pub struct Index {
     offsets: Section,
     postings: Section,
     stamps: Section,
+    ref_offsets: Section,
+    ref_postings: Section,
     files: u32,
     names_len: u32,
     bytes: usize,
@@ -304,8 +353,15 @@ impl Index {
         }
         let mut it = sections.into_iter();
         let mut next = || it.next().ok_or(Corrupt);
-        let (paths, names, offsets, postings, stamps) =
-            (next()?, next()?, next()?, next()?, next()?);
+        let (paths, names, offsets, postings, stamps, ref_offsets, ref_postings) = (
+            next()?,
+            next()?,
+            next()?,
+            next()?,
+            next()?,
+            next()?,
+            next()?,
+        );
 
         let paths = open_fst(paths)?;
         let names = open_fst(names)?;
@@ -313,6 +369,7 @@ impl Index {
         let names_len = u32::try_from(names.len()).map_err(|_| Corrupt)?;
         if stamps.as_ref().len() != paths.len() * STAMP_LEN
             || offsets.as_ref().len() != (names.len() + 1) * OFFSET_LEN
+            || ref_offsets.as_ref().len() != (names.len() + 1) * OFFSET_LEN
         {
             return Err(OpenError::Corrupt);
         }
@@ -322,29 +379,36 @@ impl Index {
             offsets,
             postings,
             stamps,
+            ref_offsets,
+            ref_postings,
             files,
             names_len,
             bytes: b.len(),
         })
     }
 
-    fn postings_range(&self, rank: usize) -> Option<&[u8]> {
+    fn postings_range<'a>(
+        offsets: &'a Section,
+        postings: &'a Section,
+        rank: usize,
+    ) -> Option<&'a [u8]> {
         let at = |i: usize| {
-            let o = self
-                .offsets
-                .as_ref()
-                .get(i * OFFSET_LEN..(i + 1) * OFFSET_LEN)?;
+            let o = offsets.as_ref().get(i * OFFSET_LEN..(i + 1) * OFFSET_LEN)?;
             usize::try_from(le_u64(o)).ok()
         };
-        self.postings.as_ref().get(at(rank)?..at(rank + 1)?)
+        postings.as_ref().get(at(rank)?..at(rank + 1)?)
     }
 
-    /// 破損した postings は空に見せず Corrupt で返す。
-    pub fn lookup(&self, name: &[u8]) -> Result<Vec<Hit>, Corrupt> {
+    fn hits(
+        &self,
+        offsets: &Section,
+        postings: &Section,
+        name: &[u8],
+    ) -> Result<Vec<Hit>, Corrupt> {
         let Some(rank) = self.names.get(name) else {
             return Ok(Vec::new());
         };
-        let slice = self.postings_range(rank as usize).ok_or(Corrupt)?;
+        let slice = Self::postings_range(offsets, postings, rank as usize).ok_or(Corrupt)?;
         decode_rows(slice, self.files, self.names_len)?
             .into_iter()
             .map(|row| {
@@ -352,6 +416,16 @@ impl Index {
                 Ok(Hit { path, row })
             })
             .collect()
+    }
+
+    /// 破損した postings は空に見せず Corrupt で返す。
+    pub fn lookup(&self, name: &[u8]) -> Result<Vec<Hit>, Corrupt> {
+        self.hits(&self.offsets, &self.postings, name)
+    }
+
+    /// 参照の位置。`row.kind` は参照の種類。
+    pub fn lookup_refs(&self, name: &[u8]) -> Result<Vec<Hit>, Corrupt> {
+        self.hits(&self.ref_offsets, &self.ref_postings, name)
     }
 
     /// 包含元の名前。`row.container` は名前 FST の順位+1、0 は包含元なし。
@@ -398,6 +472,8 @@ impl Index {
             ("offsets", self.offsets.as_ref().len()),
             ("postings", self.postings.as_ref().len()),
             ("stamps", self.stamps.as_ref().len()),
+            ("ref_offsets", self.ref_offsets.as_ref().len()),
+            ("ref_postings", self.ref_postings.as_ref().len()),
         ]
     }
 
@@ -415,26 +491,56 @@ impl Index {
                 size: s.size,
                 lang: s.lang,
                 defs: Vec::new(),
+                refs: Vec::new(),
             })
             .collect();
+        let mut ids: HashMap<u64, u32> = HashMap::new();
+        let intern_name = |ids: &mut HashMap<u64, u32>, rank: u64| -> Result<u32, Corrupt> {
+            if let Some(&id) = ids.get(&rank) {
+                return Ok(id);
+            }
+            let n = key_by_rank(self.names.as_fst(), rank).ok_or(Corrupt)?;
+            let id = intern(std::str::from_utf8(&n).map_err(|_| Corrupt)?);
+            ids.insert(rank, id);
+            Ok(id)
+        };
         let mut names = self.names.stream();
         while let Some((name, rank)) = names.next() {
             let name = String::from_utf8(name.to_vec()).map_err(|_| Corrupt)?;
-            let slice = self.postings_range(rank as usize).ok_or(Corrupt)?;
-            for row in decode_rows(slice, self.files, self.names_len)? {
-                let container = self
-                    .container_name(&row)
+            let rank = rank as usize;
+            let container_of = |row: &Row| {
+                self.container_name(row)
                     .map(String::from_utf8)
                     .transpose()
-                    .map_err(|_| Corrupt)?;
+                    .map_err(|_| Corrupt)
+            };
+            let defs = Self::postings_range(&self.offsets, &self.postings, rank).ok_or(Corrupt)?;
+            for row in decode_rows(defs, self.files, self.names_len)? {
                 let file = out.get_mut(row.file as usize).ok_or(Corrupt)?;
                 file.defs.push(Def {
                     name: name.clone(),
                     line: row.line,
                     col: row.col,
                     kind: row.kind,
-                    container,
+                    container: container_of(&row)?,
                     body: 0..0,
+                });
+            }
+            let refs =
+                Self::postings_range(&self.ref_offsets, &self.ref_postings, rank).ok_or(Corrupt)?;
+            let name_id = intern_name(&mut ids, rank as u64)?;
+            for row in decode_rows(refs, self.files, self.names_len)? {
+                let container = match row.container.checked_sub(1) {
+                    Some(c) => intern_name(&mut ids, u64::from(c))? + 1,
+                    None => 0,
+                };
+                let f = out.get_mut(row.file as usize).ok_or(Corrupt)?;
+                f.refs.push(PackedRef {
+                    name: name_id,
+                    container,
+                    line: row.line,
+                    col: row.col,
+                    kind: row.kind,
                 });
             }
         }

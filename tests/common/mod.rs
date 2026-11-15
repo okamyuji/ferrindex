@@ -73,13 +73,51 @@ impl Repo {
     pub fn run_in(&self, sub: &Path, args: &[&str]) -> Run {
         run_at(&self.root.join(sub), &self.xdg, args)
     }
+
+    pub fn run_with(&self, env: &[(&str, &str)], args: &[&str]) -> Run {
+        run_env(&self.root, &self.xdg, env, args)
+    }
+
+    /// `trust` は端末からだけ受け付けるので、`script` で疑似端末を与えて実行する。
+    pub fn trust(&self) {
+        let bin = env!("CARGO_BIN_EXE_ferrindex");
+        // macOS（BSD）と Linux（util-linux）で script の引数の形が違う。
+        let args: Vec<String> = if cfg!(target_os = "linux") {
+            ["-q", "-e", "-c", &format!("'{bin}' trust"), "/dev/null"]
+                .map(String::from)
+                .to_vec()
+        } else {
+            ["-q", "/dev/null", bin, "trust"].map(String::from).to_vec()
+        };
+        let st = Command::new("script")
+            .args(&args)
+            .current_dir(&self.root)
+            .env("XDG_CACHE_HOME", &self.xdg)
+            .env("XDG_DATA_HOME", data_home(&self.xdg))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "trust failed: {st}");
+    }
+}
+
+/// 信頼の一覧の置き場。利用者の `~/.local/share` に書かないよう、試験ごとの一時ディレクトリに置く。
+pub fn data_home(xdg: &Path) -> PathBuf {
+    xdg.with_file_name("xdg-data")
 }
 
 pub fn run_at(cwd: &Path, xdg: &Path, args: &[&str]) -> Run {
+    run_env(cwd, xdg, &[], args)
+}
+
+fn run_env(cwd: &Path, xdg: &Path, env: &[(&str, &str)], args: &[&str]) -> Run {
     let o = Command::new(env!("CARGO_BIN_EXE_ferrindex"))
         .args(args)
         .current_dir(cwd)
         .env("XDG_CACHE_HOME", xdg)
+        .env("XDG_DATA_HOME", data_home(xdg))
+        .envs(env.iter().copied())
         .output()
         .unwrap();
     Run {

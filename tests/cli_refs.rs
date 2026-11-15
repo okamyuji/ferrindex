@@ -1,0 +1,1234 @@
+mod common;
+
+use common::Repo;
+
+const RUST_SRC: &str = "// target is mentioned here
+fn target() {}
+fn caller_fn() {
+    target();
+    let s = \"target\";
+    let f = target;
+    external_call();
+}
+";
+
+const PY_SRC: &str = "class A:\n    pass\n\nclass B(A):\n    pass\n";
+
+fn repo() -> Repo {
+    let r = Repo::new();
+    r.write("a.rs", RUST_SRC);
+    r.write("b.py", PY_SRC);
+    r
+}
+
+#[test]
+fn refs_list_code_occurrences_only() {
+    let r = repo();
+    let o = r.run(&["refs", "target"]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "a.rs:6:13 ref in caller_fn\tlet f = target;",
+        ]
+    );
+}
+
+#[test]
+fn callers_show_the_calling_function() {
+    let r = repo();
+    let o = r.run(&["callers", "target"]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(o.lines(), ["a.rs:4:5 call in caller_fn\ttarget();"]);
+}
+
+#[test]
+fn impls_list_subclasses() {
+    let r = repo();
+    let o = r.run(&["impls", "A"]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(o.lines(), ["b.py:4:9 inherit in B\tclass B(A):"]);
+}
+
+#[test]
+fn supers_list_bases() {
+    let r = repo();
+    let o = r.run(&["supers", "B"]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(o.lines(), ["b.py:4:9 inherit in B\tclass B(A):"]);
+}
+
+#[test]
+fn qualified_term_uses_the_last_segment() {
+    let r = Repo::new();
+    r.write("a.rs", "fn user() {\n    x.bar();\n}\n");
+    for term in ["Foo.bar", "Foo::bar", "bar"] {
+        let o = r.run(&["refs", term]);
+        assert_eq!(o.lines(), ["a.rs:2:7 call in user\tx.bar();"], "{term}");
+    }
+}
+
+#[test]
+fn no_references_exits_1() {
+    let r = repo();
+    let o = r.run(&["callers", "nothing_calls_this"]);
+    assert_eq!((o.code, o.out.as_str(), o.err.as_str()), (1, "", ""));
+    assert_eq!(r.run(&["refs", "nothing_calls_this"]).code, 1);
+    assert_eq!(r.run(&["impls", "B"]).code, 1);
+    assert_eq!(r.run(&["supers", "A"]).code, 1);
+}
+
+#[test]
+fn reference_only_name_is_found() {
+    let r = repo();
+    let o = r.run(&["callers", "external_call"]);
+    assert_eq!(o.lines(), ["a.rs:7:5 call in caller_fn\texternal_call();"]);
+    let o = r.run(&["refs", "external_call"]);
+    assert_eq!(o.lines(), ["a.rs:7:5 call in caller_fn\texternal_call();"]);
+}
+
+fn many_calls(n: usize) -> String {
+    let mut s = String::from("fn caller_fn() {\n");
+    for _ in 0..n {
+        s.push_str("    target();\n");
+    }
+    s.push_str("}\n");
+    s
+}
+
+#[test]
+fn limit_and_more_line() {
+    let r = Repo::new();
+    r.write("a.rs", &many_calls(25));
+    for cmd in ["callers", "refs"] {
+        let o = r.run(&[cmd, "target"]);
+        assert_eq!(o.lines().len(), 20, "{cmd}");
+        assert_eq!(o.err, "… 5 more\n", "{cmd}");
+        let o = r.run(&[cmd, "target", "--limit", "25"]);
+        assert_eq!((o.lines().len(), o.err.as_str()), (25, ""), "{cmd}");
+        let o = r.run(&[cmd, "target", "--limit", "2"]);
+        assert_eq!(
+            (o.lines().len(), o.err.as_str()),
+            (2, "… 23 more\n"),
+            "{cmd}"
+        );
+    }
+}
+
+#[test]
+fn refs_count_the_excess_when_every_file_was_read() {
+    let r = Repo::new();
+    for f in ["a", "b", "c"] {
+        r.write(&format!("{f}.rs"), "fn x() {\n    target();\n}\n");
+    }
+    r.write("d.rs", "fn unrelated() {}\n");
+    let o = r.run(&["refs", "target", "--limit", "1"]);
+    assert_eq!(o.lines(), ["a.rs:2:5 call in x\ttarget();"]);
+    assert_eq!(o.err, "… 2 more\n");
+}
+
+#[test]
+fn refs_skip_binary_and_oversize_files() {
+    let r = Repo::new();
+    r.write("a.rs", "fn x() {\n    target();\n}\n");
+    r.write("bin.rs", "\0 fn y() {\n    target();\n}\n");
+    r.write(
+        "big.rs",
+        &format!("fn z() {{ target(); }}\n{}", " ".repeat(1 << 20)),
+    );
+    let o = r.run(&["refs", "target"]);
+    assert_eq!(o.lines(), ["a.rs:2:5 call in x\ttarget();"]);
+    assert_eq!(o.err, "");
+}
+
+#[test]
+fn refs_are_fresh_after_edit() {
+    let r = repo();
+    r.run(&["update"]);
+    r.write(
+        "a.rs",
+        &format!("{RUST_SRC}fn later() {{\n    target();\n}}\n"),
+    );
+    for cmd in ["callers", "refs"] {
+        let o = r.run(&[cmd, "target"]);
+        assert!(
+            o.out.contains("a.rs:10:5 call in later"),
+            "{cmd}: {}",
+            o.out
+        );
+    }
+}
+
+#[test]
+fn paths_are_relative_to_the_current_directory() {
+    let r = Repo::new();
+    r.write("sub/a.rs", "fn x() {\n    target();\n}\n");
+    r.write("top.rs", "fn y() {\n    target();\n}\n");
+    for cmd in ["callers", "refs"] {
+        let o = r.run_in(std::path::Path::new("sub"), &[cmd, "target"]);
+        assert_eq!(
+            o.lines(),
+            [
+                "a.rs:2:5 call in x\ttarget();",
+                "../top.rs:2:5 call in y\ttarget();"
+            ],
+            "{cmd}"
+        );
+    }
+}
+
+#[test]
+fn bad_arguments_exit_2() {
+    let r = repo();
+    assert_eq!(r.run(&["refs"]).code, 2);
+    assert_eq!(r.run(&["refs", "a", "b"]).code, 2);
+    assert_eq!(r.run(&["refs", "  "]).code, 2);
+}
+
+#[test]
+fn refs_keep_path_order_across_parallel_batches() {
+    let r = Repo::new();
+    for i in 0..1000 {
+        r.write(&format!("d{i:03}.rs"), "fn x() {\n    target();\n}\n");
+    }
+    let o = r.run(&["refs", "target", "--limit", "300"]);
+    let paths: Vec<String> = o
+        .lines()
+        .iter()
+        .map(|l| l.split(':').next().unwrap().to_string())
+        .collect();
+    let want: Vec<String> = (0..300).map(|i| format!("d{i:03}.rs")).collect();
+    assert_eq!(paths, want);
+    assert_eq!(o.err, "… more files may match\n");
+    let all = r.run(&["refs", "target", "--limit", "1000"]);
+    assert_eq!((all.lines().len(), all.err.as_str()), (1000, ""));
+}
+
+const RUST_IMPLS: &str = "trait Tr {}
+struct X;
+struct G<T>(T);
+impl Tr for X {
+    fn f(&self) {}
+}
+impl<T> Tr for G<T> {}
+";
+
+#[test]
+fn rust_impls_and_supers_follow_impl_trait_for() {
+    let r = Repo::new();
+    r.write("a.rs", RUST_IMPLS);
+    let o = r.run(&["impls", "Tr"]);
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:6 inherit in X\timpl Tr for X {",
+            "a.rs:7:9 inherit in G\timpl<T> Tr for G<T> {}"
+        ]
+    );
+    let o = r.run(&["supers", "G"]);
+    assert_eq!(o.lines(), ["a.rs:7:9 inherit in G\timpl<T> Tr for G<T> {}"]);
+    assert_eq!(r.run(&["supers", "Tr"]).code, 1);
+}
+
+#[test]
+fn rust_supers_and_impls_follow_where_self_bounds() {
+    let r = Repo::new();
+    r.write(
+        "a.rs",
+        "trait Base {}\ntrait C where Self: Base {}\ntrait D<T> where T: Base {}\n",
+    );
+    let o = r.run(&["supers", "C"]);
+    assert_eq!(
+        o.lines(),
+        ["a.rs:2:21 inherit in C\ttrait C where Self: Base {}"]
+    );
+    assert_eq!(r.run(&["supers", "D"]).code, 1);
+    let o = r.run(&["impls", "Base"]);
+    assert_eq!(
+        o.lines(),
+        ["a.rs:2:21 inherit in C\ttrait C where Self: Base {}"]
+    );
+}
+
+#[test]
+fn go_impls_and_supers_ask_for_precise() {
+    let r = Repo::new();
+    r.write(
+        "a.go",
+        "package a\n\ntype Reader interface {\n\tRead()\n}\n\ntype F struct{}\n",
+    );
+    for args in [["impls", "Reader"], ["supers", "F"]] {
+        let o = r.run(&args);
+        assert_eq!(o.code, 1, "{args:?}");
+        assert_eq!(o.out, "");
+        assert_eq!(
+            o.err,
+            "ferrindex: Go のインターフェースの実装は名前一致では分かりません。--precise を使ってください\n"
+        );
+    }
+    // callers は Go でも名前一致で答えられる
+    r.write("b.go", "package a\n\nfunc g() {\n\tx.Read()\n}\n");
+    assert_eq!(r.run(&["callers", "Read"]).code, 0);
+}
+
+fn fake_server() -> String {
+    format!(
+        "python3 -I {}/tests/fixtures/fake_lsp.py",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+/// `target` を参照する c.rs を足した作業ツリーで、偽サーバーを使って実行する。
+fn precise(r: &Repo, env: &[(&str, &str)], args: &[&str]) -> common::Run {
+    r.trust();
+    let server = fake_server();
+    let mut all = vec![("FERRINDEX_LSP_RUST", server.as_str())];
+    all.extend_from_slice(env);
+    r.run_with(&all, args)
+}
+
+const C_SRC: &str = "fn other() {\n    let g = target;\n}\n";
+
+#[test]
+fn precise_uses_the_server_result() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    let log = r.xdg.with_file_name("log");
+    let o = precise(
+        &r,
+        &[
+            ("FAKE_REFS", r#"[["c.rs", 1, 12], ["a.rs", 3, 4]]"#),
+            ("FAKE_LOG", log.to_str().unwrap()),
+        ],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.code, 0, "{}", o.err);
+    // 種類は位置の参照から取る（refs の既定の ref でなく call）。
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "c.rs:2:13 ref in other\tlet g = target;",
+        ]
+    );
+    assert_eq!(o.err, "");
+    // 定義 `fn target` の名前の位置（2行4列）を 0 始まりで問い、同じ答えが2回続いたら受け入れる。
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "textDocument/references 1 3\n".repeat(2)
+    );
+}
+
+#[test]
+fn precise_maps_each_command_to_its_method() {
+    // callers の答えは caller.rs の2か所だけなので、名前一致の呼び出しもその2か所にする。
+    let only = Repo::new();
+    only.write("t.rs", "fn target() {}\n");
+    only.write(
+        "caller.rs",
+        "fn g() {\n\n\n\n target();\n\n  target();\n}\n",
+    );
+    let o = precise(&only, &[], &["callers", "target", "--precise"]);
+    assert_eq!(o.err, "");
+    assert_eq!(
+        o.lines(),
+        [
+            "caller.rs:5:2 call in g\ttarget();",
+            "caller.rs:7:3 call in g\ttarget();",
+        ]
+    );
+
+    // impls と supers は呼び出しを答えないので、答えに無い a.rs の呼び出しで名前一致に戻らない。
+    let r = repo();
+    r.write("impl.rs", "mod m {\n\n\n  fn imp() {}\n}\n");
+    r.write("base.rs", "mod n {\n    fn base() {}\n}\n");
+    let cases = [
+        ("impls", "impl.rs:4:6 inherit in m\tfn imp() {}"),
+        ("supers", "base.rs:2:8 inherit in n\tfn base() {}"),
+    ];
+    for (cmd, want) in cases {
+        let o = precise(&r, &[], &[cmd, "target", "--precise"]);
+        assert_eq!(o.err, "", "{cmd}");
+        assert_eq!(o.lines(), [want], "{cmd}");
+    }
+}
+
+#[test]
+fn precise_falls_back_on_timeout() {
+    let r = repo();
+    let o = precise(
+        &r,
+        &[("FAKE_MODE", "hang")],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(o.lines().len(), 2);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: rust-analyzer: 期限内に答えがありませんでした。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn precise_falls_back_when_the_server_fails() {
+    let r = repo();
+    let o = precise(
+        &r,
+        &[("FAKE_MODE", "garbage")],
+        &["callers", "target", "--precise"],
+    );
+    assert_eq!(o.lines(), ["a.rs:4:5 call in caller_fn\ttarget();"]);
+    assert!(
+        o.err.ends_with("名前一致の結果です（未確定）\n"),
+        "{}",
+        o.err
+    );
+}
+
+#[test]
+fn precise_queries_every_definition_up_to_5() {
+    let r = repo();
+    let log = r.xdg.with_file_name("log");
+    r.write("c.rs", C_SRC);
+    let log_env = [
+        ("FAKE_REFS", r#"[["c.rs", 1, 12]]"#),
+        ("FAKE_LOG", log.to_str().unwrap()),
+    ];
+    r.write("d.rs", "\nfn target() {}\n");
+    let o = precise(&r, &log_env, &["refs", "target", "--precise"]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    // 定義ごとに、同じ答えが2回続くまで問う。
+    let asked = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(asked.lines().count(), 4, "{asked}");
+
+    std::fs::remove_file(&log).unwrap();
+    for i in 0..4 {
+        r.write(&format!("e{i}.rs"), "fn target() {}\n");
+    }
+    let o = precise(&r, &log_env, &["refs", "target", "--precise"]);
+    assert!(!log.exists());
+    assert_eq!(o.lines().len(), 3);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: targetの定義が6件あり、問い合わせる上限の5件を超えます。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn precise_with_five_definitions_asks_the_server() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    for i in 0..4 {
+        r.write(&format!("e{i}.rs"), "fn target() {}\n");
+    }
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["c.rs", 1, 12], ["a.rs", 3, 4]]"#)],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+}
+
+#[test]
+fn precise_without_definition_falls_back() {
+    let r = repo();
+    let o = precise(&r, &[], &["callers", "external_call", "--precise"]);
+    assert_eq!(o.lines(), ["a.rs:7:5 call in caller_fn\texternal_call();"]);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: external_callの定義が見つかりません。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn results_outside_root_are_dropped() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    let outside = r.root.with_file_name("outside.rs");
+    std::fs::write(&outside, "fn x() { target(); }\n").unwrap();
+    let refs = format!(
+        r#"[["file://{}", 0, 9], ["c.rs", 1, 12], ["a.rs", 3, 4]]"#,
+        outside.display()
+    );
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", &refs)],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "c.rs:2:13 ref in other\tlet g = target;",
+        ]
+    );
+}
+
+#[test]
+fn results_climbing_out_of_root_with_dot_dot_are_dropped() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    std::fs::write(
+        r.root.with_file_name("outside.rs"),
+        "fn x() { target(); }\n",
+    )
+    .unwrap();
+    for cmd in ["refs", "impls"] {
+        let o = precise(
+            &r,
+            &[(
+                "FAKE_REFS",
+                r#"[["../outside.rs", 0, 9], ["c.rs", 1, 12], ["a.rs", 3, 4]]"#,
+            )],
+            &[cmd, "target", "--precise"],
+        );
+        assert!(
+            o.lines().iter().all(|l| !l.contains("outside")),
+            "{cmd}: {:?}",
+            o.lines()
+        );
+    }
+}
+
+#[test]
+fn refs_drop_the_declaration_the_server_returns() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    // solargraph は includeDeclaration: false でも定義の名前の位置（ここでは a.rs の 2行4列）を返す。
+    let o = precise(
+        &r,
+        &[(
+            "FAKE_REFS",
+            r#"[["a.rs", 1, 3], ["c.rs", 1, 12], ["a.rs", 3, 4]]"#,
+        )],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "c.rs:2:13 ref in other\tlet g = target;",
+        ]
+    );
+    // 定義だけの答えは0件と同じに扱う。
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["a.rs", 1, 3]]"#)],
+        &["refs", "target", "--precise"],
+    );
+    assert!(o.err.contains("言語サーバーの答えが0件でした"), "{}", o.err);
+}
+
+#[test]
+fn refs_keep_a_recursive_call_inside_the_queried_function() {
+    let r = Repo::new();
+    r.write("r.rs", "fn target(n: u32) {\n    target(n - 1);\n}\n");
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["r.rs", 1, 4]]"#)],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["r.rs:2:5 call in target\ttarget(n - 1);"]);
+}
+
+#[test]
+fn server_text_in_the_reason_line_is_escaped() {
+    let r = repo();
+    let o = precise(
+        &r,
+        &[
+            ("FAKE_MODE", "garbage"),
+            ("FAKE_GARBAGE", "\x1b]0;PWN\x07\x1b[2Jevil"),
+        ],
+        &["refs", "target", "--precise"],
+    );
+    assert!(!o.err.contains('\x1b'), "{:?}", o.err);
+    assert!(
+        o.err.contains("\\x1b]0;PWN\\x07\\x1b[2Jevil"),
+        "{:?}",
+        o.err
+    );
+}
+
+#[test]
+fn precise_belongs_to_the_reference_commands() {
+    let r = repo();
+    let o = r.run(&["find", "target", "--precise"]);
+    assert_eq!(o.code, 2);
+    assert!(o.err.contains("--precise"), "{}", o.err);
+}
+
+#[test]
+fn precise_keeps_results_in_files_without_a_language() {
+    let r = repo();
+    r.write("notes.txt", "see target here\n");
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["notes.txt", 0, 4], ["a.rs", 3, 4]]"#)],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "notes.txt:1:5 ref\tsee target here",
+        ]
+    );
+}
+
+#[test]
+fn precise_empty_answer_falls_back() {
+    let r = repo();
+    let o = precise(&r, &[("FAKE_REFS", "[]")], &["refs", "target", "--precise"]);
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(o.lines().len(), 2);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: 言語サーバーの答えが0件でした。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn precise_empty_answer_with_no_name_match_still_gives_the_reason() {
+    let r = repo();
+    r.write("e.rs", "fn lonely() {}\n");
+    let o = precise(&r, &[("FAKE_REFS", "[]")], &["refs", "lonely", "--precise"]);
+    assert_eq!(o.code, 1, "{}", o.err);
+    assert_eq!(o.out, "");
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: 言語サーバーの答えが0件でした。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn precise_answer_that_never_settles_falls_back() {
+    let r = repo();
+    let o = precise(
+        &r,
+        &[("FAKE_MODE", "changing")],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.lines().len(), 2);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: rust-analyzer: 答えが期限内に定まりませんでした。名前一致の結果です（未確定）\n"
+    );
+}
+
+const C_FILE: &str = "int target(void) { return 0; }\nint f(void) { return target(); }\n";
+
+#[test]
+fn c_without_compile_commands_does_not_start_clangd() {
+    let r = Repo::new();
+    r.write("x.c", C_FILE);
+    let log = r.xdg.with_file_name("log");
+    let server = fake_server();
+    let env = [
+        ("FERRINDEX_LSP_C", server.as_str()),
+        ("FAKE_REFS", r#"[["x.c", 1, 21]]"#),
+        ("FAKE_LOG", log.to_str().unwrap()),
+    ];
+    r.trust();
+    let o = r.run_with(&env, &["refs", "target", "--precise"]);
+    assert!(!log.exists());
+    assert_eq!(
+        o.lines(),
+        ["x.c:2:22 call in f\tint f(void) { return target(); }"]
+    );
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: clangd: compile_commands.jsonが見つかりません。名前一致の結果です（未確定）\n"
+    );
+
+    r.write("compile_commands.json", "[]\n");
+    let o = r.run_with(&env, &["refs", "target", "--precise"]);
+    assert!(log.exists());
+    assert_eq!(o.err, "");
+}
+
+#[test]
+fn precise_answer_missing_a_call_falls_back() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    // 定義が2つでも、修飾の無い名前の呼び出しはどれかの定義を指すので、答えの和集合に無ければ戻る。
+    r.write("z.rs", "fn target() {}\n");
+    // 答えに a.rs:4:5 の呼び出しが無い（別名や取り込み経由の呼び出しを返さないサーバー）。
+    for cmd in ["refs", "callers"] {
+        let o = precise(
+            &r,
+            &[("FAKE_REFS", r#"[["c.rs", 1, 12]]"#)],
+            &[cmd, "target", "--precise"],
+        );
+        assert!(
+            o.lines().contains(&"a.rs:4:5 call in caller_fn\ttarget();"),
+            "{cmd}: {:?}",
+            o.lines()
+        );
+        assert_eq!(
+            o.err,
+            "ferrindex: --precise: 言語サーバーが取り込みや別名経由の呼び出しを返していません。名前一致の結果です（未確定）\n",
+            "{cmd}"
+        );
+    }
+}
+
+/// `Foo.bar`（2行7列）と `Baz.bar`（6行7列、どちらも0始まり）と、それぞれを呼ぶ u.rs。
+fn two_bars() -> Repo {
+    let r = Repo::new();
+    r.write("s.rs", common::SAMPLE);
+    r.write(
+        "u.rs",
+        "fn u(x: Foo, y: Baz) {\n    x.bar();\n    y.bar();\n}\n",
+    );
+    r
+}
+
+#[test]
+fn qualified_name_keeps_its_own_answer_when_every_bar_call_is_covered() {
+    let r = two_bars();
+    let log = r.xdg.with_file_name("log");
+    let o = precise(
+        &r,
+        &[
+            (
+                "FAKE_REFS",
+                r#"{"2 7": [["u.rs", 1, 6]], "6 7": [["u.rs", 2, 6]]}"#,
+            ),
+            ("FAKE_LOG", log.to_str().unwrap()),
+        ],
+        &["refs", "Baz.bar", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["u.rs:3:7 call in u\ty.bar();"]);
+    // 修飾の無い `bar` の定義すべてに問う。
+    let log = std::fs::read_to_string(&log).unwrap();
+    assert!(log.contains("textDocument/references 2 7\n"), "{log}");
+    assert!(log.contains("textDocument/references 6 7\n"), "{log}");
+}
+
+#[test]
+fn qualified_name_falls_back_when_a_bar_call_is_missing() {
+    let r = two_bars();
+    for cmd in ["refs", "callers"] {
+        let o = precise(
+            &r,
+            &[("FAKE_REFS", r#"{"6 7": [["u.rs", 2, 6]]}"#)],
+            &[cmd, "Baz.bar", "--precise"],
+        );
+        assert_eq!(
+            o.err,
+            "ferrindex: --precise: 言語サーバーが取り込みや別名経由の呼び出しを返していません。名前一致の結果です（未確定）\n",
+            "{cmd}"
+        );
+        assert_eq!(
+            o.lines(),
+            [
+                "u.rs:2:7 call in u\tx.bar();",
+                "u.rs:3:7 call in u\ty.bar();"
+            ],
+            "{cmd}"
+        );
+    }
+}
+
+#[test]
+fn qualified_name_checks_the_definition_cap_of_the_last_name() {
+    let r = two_bars();
+    let more: String = (0..4)
+        .map(|i| format!("struct Q{i};\nimpl Q{i} {{\n    fn bar(&self) {{}}\n}}\n"))
+        .collect();
+    r.write("q.rs", &more);
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["u.rs", 2, 6]]"#)],
+        &["refs", "Baz.bar", "--precise"],
+    );
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: barの定義が6件あり、問い合わせる上限の5件を超えます。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn precise_uses_only_exact_definitions() {
+    let r = repo();
+    let log = r.xdg.with_file_name("log");
+    let o = precise(
+        &r,
+        &[
+            ("FAKE_REFS", r#"[["a.rs", 3, 4]]"#),
+            ("FAKE_LOG", log.to_str().unwrap()),
+        ],
+        &["refs", "targ", "--precise"],
+    );
+    assert!(!log.exists());
+    assert_eq!(o.code, 1);
+    assert_eq!(o.out, "");
+    assert!(o.err.contains("targの定義が見つかりません"), "{}", o.err);
+}
+
+#[test]
+fn markdown_sections_are_not_asked() {
+    let r = repo();
+    r.write("doc.md", "# Notes\n\n## target\n");
+    let log = r.xdg.with_file_name("log");
+    let o = precise(
+        &r,
+        &[
+            ("FAKE_REFS", r#"[["a.rs", 3, 4]]"#),
+            ("FAKE_LOG", log.to_str().unwrap()),
+        ],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["a.rs:4:5 call in caller_fn\ttarget();"]);
+}
+
+#[test]
+fn markdown_only_definition_reason_names_no_server() {
+    let r = Repo::new();
+    r.write("doc.md", "## lonely\n");
+    r.write("a.rs", "fn x() {\n    lonely();\n}\n");
+    r.trust();
+    let o = r.run(&["callers", "lonely", "--precise"]);
+    assert_eq!(o.lines().len(), 1);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: lonelyの定義が見つかりません。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn go_precise_failure_shows_the_reason_not_the_hint() {
+    let r = Repo::new();
+    r.write(
+        "p.go",
+        "package p\n\ntype Provider interface {\n\tGet() int\n}\n\ntype X struct{}\n\nfunc (X) Get() int { return 0 }\n\nvar _ Provider = X{}\n",
+    );
+    r.trust();
+    let o = r.run_with(
+        &[("FERRINDEX_LSP_GO", "/nonexistent/x")],
+        &["impls", "Provider", "--precise"],
+    );
+    assert_eq!(o.code, 1);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: gopls: goplsが見つかりません\n"
+    );
+    // refs は Go でも名前一致で答えられる。
+    let o = r.run_with(
+        &[("FERRINDEX_LSP_GO", "/nonexistent/x")],
+        &["refs", "Provider", "--precise"],
+    );
+    assert_eq!(o.lines().len(), 1, "{}", o.err);
+}
+
+fn precise_py(r: &Repo, answer: &str, args: &[&str]) -> common::Run {
+    r.trust();
+    let server = fake_server();
+    r.run_with(
+        &[
+            ("FERRINDEX_LSP_PYTHON", server.as_str()),
+            ("FAKE_REFS", answer),
+        ],
+        args,
+    )
+}
+
+#[test]
+fn impls_answer_must_cover_every_subclass() {
+    let r = repo();
+    r.write("c.py", "class C(A):\n    pass\n");
+    // 答えは B と、問うた A 自身。A は出さない。
+    let o = precise_py(
+        &r,
+        r#"[["b.py", 3, 6], ["c.py", 0, 6], ["b.py", 0, 6]]"#,
+        &["impls", "A", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(
+        o.lines(),
+        [
+            "b.py:4:7 inherit\tclass B(A):",
+            "c.py:1:7 inherit\tclass C(A):"
+        ]
+    );
+
+    let o = precise_py(&r, r#"[["b.py", 3, 6]]"#, &["impls", "A", "--precise"]);
+    assert_eq!(o.lines().len(), 2);
+    assert_eq!(
+        o.err,
+        "ferrindex: --precise: 言語サーバーが継承の一部を返していません。名前一致の結果です（未確定）\n"
+    );
+}
+
+#[test]
+fn supers_answer_must_cover_every_base() {
+    let r = repo();
+    r.write("x.py", "class Z:\n    pass\n");
+    let o = precise_py(&r, r#"[["b.py", 0, 6]]"#, &["supers", "B", "--precise"]);
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["b.py:1:7 inherit\tclass A:"]);
+
+    let o = precise_py(&r, r#"[["x.py", 0, 6]]"#, &["supers", "B", "--precise"]);
+    assert_eq!(o.lines(), ["b.py:4:9 inherit in B\tclass B(A):"]);
+    assert!(o.err.contains("継承の一部を返していません"), "{}", o.err);
+}
+
+#[test]
+fn supers_compare_only_the_bases_of_the_queried_type() {
+    let r = Repo::new();
+    r.write(
+        "s.py",
+        "class A2:\n    pass\n\nclass D2:\n    pass\n\nclass B2(A2):\n    pass\n\nclass C2(D2):\n    pass\n",
+    );
+    // C2 の基底 D2 は B2 の基底ではないので、答えに無くても名前一致に戻らない。
+    let o = precise_py(&r, r#"[["s.py", 0, 6]]"#, &["supers", "B2", "--precise"]);
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["s.py:1:7 inherit\tclass A2:"]);
+}
+
+#[test]
+fn supers_of_a_nested_class_give_only_its_own_bases() {
+    let r = Repo::new();
+    r.write(
+        "n.py",
+        "class Base1: pass\nclass Base2: pass\nclass Left:\n    class X(Base1): pass\nclass Right:\n    class X(Base2): pass\n",
+    );
+    let o = r.run(&["supers", "Left.X"]);
+    assert_eq!(o.lines(), ["n.py:4:13 inherit in X\tclass X(Base1): pass"]);
+    let o = r.run(&["supers", "X"]);
+    assert_eq!(
+        o.lines(),
+        [
+            "n.py:4:13 inherit in X\tclass X(Base1): pass",
+            "n.py:6:13 inherit in X\tclass X(Base2): pass"
+        ]
+    );
+    let o = r.run(&["supers", "X", "--limit", "1"]);
+    assert_eq!(
+        (o.lines(), o.err.as_str()),
+        (
+            vec!["n.py:4:13 inherit in X\tclass X(Base1): pass"],
+            "… 1 more\n"
+        )
+    );
+    // サーバーの答えが Left.X の基底 Base1 だけなら、名前一致に戻らない。
+    let o = precise_py(
+        &r,
+        r#"[["n.py", 0, 6]]"#,
+        &["supers", "Left.X", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["n.py:1:7 inherit\tclass Base1: pass"]);
+}
+
+#[test]
+fn supers_list_an_impl_once_for_same_named_types() {
+    let r = Repo::new();
+    r.write(
+        "x.rs",
+        "struct X;\nmod m {\n    pub struct X;\n}\ntrait T {}\nimpl T for X {}\n",
+    );
+    let o = r.run(&["supers", "X"]);
+    assert_eq!(o.lines(), ["x.rs:6:6 inherit in X\timpl T for X {}"]);
+}
+
+const UNTRUSTED_HOW: &str =
+    "絞るには、利用者が端末で `ferrindex trust` を実行してから --precise を使います";
+const AMBIGUOUS_NOTE: &str =
+    "ferrindex: bar の定義が2件あります。名前一致なので、どの定義への呼び出しかを区別しません。";
+
+fn two_bar_defs() -> Repo {
+    let r = Repo::new();
+    r.write("lib.rs", common::SAMPLE);
+    r.write("use.rs", "fn user(x: Foo) {\n    x.bar();\n}\n");
+    r
+}
+
+#[test]
+fn name_match_notes_when_the_name_has_several_definitions() {
+    let r = two_bar_defs();
+    for cmd in ["callers", "refs"] {
+        let o = r.run(&[cmd, "bar"]);
+        assert_eq!(o.code, 0, "{cmd}");
+        assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"], "{cmd}");
+        assert_eq!(o.err, format!("{AMBIGUOUS_NOTE}{UNTRUSTED_HOW}\n"), "{cmd}");
+    }
+}
+
+#[test]
+fn name_match_notes_that_the_qualifier_is_not_used() {
+    let r = two_bar_defs();
+    for cmd in ["callers", "refs"] {
+        let o = r.run(&[cmd, "Foo.bar"]);
+        assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"], "{cmd}");
+        assert_eq!(
+            o.err,
+            format!(
+                "ferrindex: 名前一致では Foo.bar の修飾を使わず、bar の呼び出しをすべて出します。{UNTRUSTED_HOW}\n"
+            ),
+            "{cmd}"
+        );
+    }
+}
+
+#[test]
+fn name_match_note_comes_before_the_more_line() {
+    let r = two_bar_defs();
+    r.write(
+        "use.rs",
+        "fn user(x: Foo) {\n    x.bar();\n    x.bar();\n}\n",
+    );
+    let o = r.run(&["callers", "bar", "--limit", "1"]);
+    assert_eq!(
+        o.err,
+        format!("{AMBIGUOUS_NOTE}{UNTRUSTED_HOW}\n… 1 more\n")
+    );
+}
+
+#[test]
+fn name_match_has_no_note_for_a_single_definition_or_no_hit() {
+    let r = repo();
+    assert_eq!(r.run(&["callers", "target"]).err, "");
+    assert_eq!(r.run(&["refs", "target"]).err, "");
+    let r = two_bar_defs();
+    let o = r.run(&["callers", "Foo.nothing"]);
+    assert_eq!((o.code, o.err.as_str()), (1, ""));
+}
+
+#[test]
+fn name_match_note_points_at_precise_in_a_trusted_repository() {
+    let r = two_bar_defs();
+    r.trust();
+    let o = r.run(&["callers", "bar"]);
+    assert_eq!(
+        o.err,
+        format!("{AMBIGUOUS_NOTE}絞るには --precise を使ってください\n")
+    );
+}
+
+#[test]
+fn name_match_still_answers_when_the_trust_list_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = two_bar_defs();
+    let list = common::data_home(&r.xdg).join("ferrindex");
+    std::fs::create_dir_all(&list).unwrap();
+    std::fs::set_permissions(&list, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let o = r.run(&["callers", "bar"]);
+    std::fs::set_permissions(&list, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(o.code, 0, "{}", o.err);
+    assert_eq!(o.lines(), ["use.rs:2:7 call in user\tx.bar();"]);
+}
+
+/// 上限を超えた行は整形せずに数える。1 行に参照が並ぶファイルで、数を 4 倍にしても時間は
+/// ほぼ 4 倍に収まる（全件を整形すると行の長さとの積で 16 倍になる）。
+#[test]
+fn refs_beyond_the_limit_are_counted_without_rendering() {
+    let time = |n: usize| {
+        let r = Repo::new();
+        r.write("a.js", &format!("function x(){{}}{}", "x();".repeat(n)));
+        assert_eq!(r.run(&["update"]).code, 0);
+        let start = std::time::Instant::now();
+        let o = r.run(&["refs", "x", "--limit", "1"]);
+        let took = start.elapsed();
+        assert_eq!(o.lines().len(), 1);
+        assert_eq!(o.err, format!("… {} more\n", n - 1));
+        took
+    };
+    time(1000);
+    // 機械の負荷の揺れで偽の失敗を出さないよう、3回の最小値で比べる
+    let best = |n| (0..3).map(|_| time(n)).min().unwrap();
+    let small = best(5000);
+    let large = best(20000);
+    // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
+    assert!(large < small * 8, "{small:?} -> {large:?}");
+}
+
+/// 言語サーバーの答えも、上限を超えた分は整形せずに数える。答えは長い1行に並ぶので、全件を
+/// 整形すると答えの数と行の長さの積で伸びる。サーバーとのやり取りには答えの数によらない
+/// 待ち（答えを確かめる問い直し）があるので、小さい側でも整形の重さがそれを上回る数にする。
+#[test]
+fn precise_answers_beyond_the_limit_are_counted_without_rendering() {
+    // 答えの間隔。答えの数と行の長さをともに伸ばす
+    const STEP: usize = 25;
+    let time = |n: usize| {
+        let r = Repo::new();
+        let calls = format!("x();{}", " ".repeat(STEP - 4)).repeat(n);
+        r.write("a.rs", &format!("fn x() {{}}\nfn y() {{ {calls}}}\n"));
+        assert_eq!(r.run(&["update"]).code, 0);
+        let answers = format!("a.rs 1 9 {STEP} {n}");
+        let start = std::time::Instant::now();
+        let o = precise(
+            &r,
+            &[("FAKE_REFS_RUN", &answers)],
+            &["refs", "x", "--precise", "--limit", "1"],
+        );
+        let took = start.elapsed();
+        assert_eq!(o.lines().len(), 1, "{}", o.err);
+        assert!(o.out.starts_with("a.rs:2:10 call in y\tfn y() { x();"));
+        // 名前一致に戻ると、この行の代わりに理由の行が出る
+        assert_eq!(o.err, format!("… {} more\n", n - 1));
+        took
+    };
+    time(1000);
+    // 機械の負荷の揺れで偽の失敗を出さないよう、3回の最小値で比べる
+    let best = |n| (0..3).map(|_| time(n)).min().unwrap();
+    let small = best(3000);
+    let large = best(12000);
+    // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
+    assert!(large < small * 8, "{small:?} -> {large:?}");
+}
+
+/// 上限の前後にある読めない答えは、表示の行にも `… N more` の N にも入らない。
+#[test]
+fn precise_more_counts_only_the_answers_that_can_be_shown() {
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    let o = precise(
+        &r,
+        &[(
+            "FAKE_REFS",
+            r#"[["0gone.rs", 0, 0], ["a.rs", 3, 4], ["c.rs", 1, 12], ["zgone.rs", 0, 0]]"#,
+        )],
+        &["refs", "target", "--precise", "--limit", "1"],
+    );
+    assert_eq!(o.lines(), ["a.rs:4:5 call in caller_fn\ttarget();"]);
+    assert_eq!(o.err, "… 1 more\n");
+}
+
+/// 同名の型が1ファイルに大量にあっても、supers は定義ごとに全参照を走査しない。
+#[test]
+fn supers_of_many_same_named_types_take_linear_time() {
+    let time = |n: usize| {
+        let r = Repo::new();
+        let mods: String = (0..n)
+            .map(|i| format!("mod m{i}{{struct A;impl super::T for A{{}}}}\n"))
+            .collect();
+        r.write("a.rs", &format!("trait T{{}}\n{mods}"));
+        assert_eq!(r.run(&["update"]).code, 0);
+        let start = std::time::Instant::now();
+        let o = r.run(&["supers", "A", "--limit", "1"]);
+        let took = start.elapsed();
+        assert_eq!(o.lines().len(), 1);
+        assert_eq!(o.err, format!("… {} more\n", n - 1));
+        took
+    };
+    time(500);
+    // 機械の負荷の揺れで偽の失敗を出さないよう、3回の最小値で比べる
+    let best = |n| (0..3).map(|_| time(n)).min().unwrap();
+    let small = best(2500);
+    let large = best(10000);
+    // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
+    assert!(large < small * 8, "{small:?} -> {large:?}");
+}
+
+#[test]
+fn precise_drops_answers_that_leave_the_root_through_a_symlink() {
+    use std::os::unix::fs::symlink;
+    let r = repo();
+    r.write("c.rs", C_SRC);
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("o.rs"), C_SRC).unwrap();
+    symlink(outside.path().join("o.rs"), r.root.join("out.rs")).unwrap();
+    symlink(r.root.join("c.rs"), r.root.join("in.rs")).unwrap();
+    let o = precise(
+        &r,
+        &[(
+            "FAKE_REFS",
+            r#"[["a.rs", 3, 4], ["out.rs", 1, 12], ["in.rs", 1, 12]]"#,
+        )],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    // 根の中を指す symlink は、今までどおり答えのパスで出す。
+    assert_eq!(
+        o.lines(),
+        [
+            "a.rs:4:5 call in caller_fn\ttarget();",
+            "in.rs:2:13 ref in other\tlet g = target;",
+        ]
+    );
+}
+
+#[test]
+fn precise_skips_answered_files_that_no_longer_exist() {
+    let r = repo();
+    let o = precise(
+        &r,
+        &[("FAKE_REFS", r#"[["a.rs", 3, 4], ["gone.rs", 0, 0]]"#)],
+        &["refs", "target", "--precise"],
+    );
+    assert_eq!(o.err, "");
+    assert_eq!(o.lines(), ["a.rs:4:5 call in caller_fn\ttarget();"]);
+}
+
+/// `refs` は経路順に（コア数 × 16）個ずつファイルを読む。
+fn chunk_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// 経路順で `at` 番目のファイルだけが target を呼ぶ、`total` 個のファイルの作業ツリー。
+fn files_calling_target_at(total: usize, at: &[usize]) -> Repo {
+    let r = Repo::new();
+    for i in 0..total {
+        let body = if at.contains(&i) { "target();" } else { "" };
+        r.write(&format!("f{i:04}.rs"), &format!("fn f() {{ {body} }}\n"));
+    }
+    r
+}
+
+#[test]
+fn refs_stop_after_the_chunk_that_reaches_the_limit() {
+    let chunk = chunk_threads() * 16;
+    let r = files_calling_target_at(chunk + 2, &[0, chunk + 1]);
+    let o = r.run(&["refs", "target", "--limit", "1"]);
+    assert_eq!(o.lines().len(), 1);
+    assert_eq!(o.err, "… more files may match\n");
+}
+
+#[test]
+fn refs_read_core_count_times_16_files_per_chunk() {
+    let threads = chunk_threads();
+    let total = threads * 16;
+    let r = files_calling_target_at(total, &[0, (threads + 16).min(total - 1)]);
+    let o = r.run(&["refs", "target", "--limit", "2"]);
+    assert_eq!((o.lines().len(), o.err.as_str()), (2, ""));
+}
+
+/// impls と supers は答えの全件に型を求める。答えのファイルの行頭は一度だけ求め、列は行の中だけを
+/// 数えるので、答えの数を 4 倍にしても時間はほぼ 4 倍に収まる。答えごとにファイルを先頭から
+/// 数えると、答えの数と行の数の積で伸びる。サーバーとのやり取りには答えの数によらない1秒ほどの
+/// 待ちがあるので、小さい側でも走査の重さがそれを上回る数にする。
+#[test]
+fn types_of_precise_answers_take_linear_time() {
+    let time = |n: usize| {
+        let r = Repo::new();
+        let lines = "//\n".repeat(n);
+        r.write("a.rs", &format!("trait T {{}}\nfn y() {{\n{lines}}}\n"));
+        assert_eq!(r.run(&["update"]).code, 0);
+        // 3 行目から 1 行に 1 件ずつ、行頭に並べる
+        let answers = format!("a.rs 2 0 0 {n} 1");
+        let start = std::time::Instant::now();
+        let o = precise(
+            &r,
+            &[("FAKE_REFS_RUN", &answers)],
+            &["impls", "T", "--precise", "--limit", "1"],
+        );
+        let took = start.elapsed();
+        assert_eq!(o.lines(), ["a.rs:3:1 inherit in y\t//"], "{}", o.err);
+        assert_eq!(o.err, format!("… {} more\n", n - 1));
+        took
+    };
+    time(100);
+    // 機械の負荷の揺れで偽の失敗を出さないよう、3回の最小値で比べる
+    let best = |n| (0..3).map(|_| time(n)).min().unwrap();
+    let small = best(10000);
+    let large = best(40000);
+    // 線形なら 4 倍、二乗なら 16 倍。揺れを見込んで 8 倍で切る
+    assert!(large < small * 8, "{small:?} -> {large:?}");
+}

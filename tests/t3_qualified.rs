@@ -53,3 +53,11 @@ fn dot_at_either_end_is_part_of_the_name() {
         ["doc.md:3:3 section x .bar y"]
     );
 }
+
+#[test]
+fn trailing_or_leading_dot_is_not_a_qualifier() {
+    let r = common::Repo::new();
+    r.write("a.rs", common::SAMPLE);
+    assert_eq!(r.run(&["find", "Foo."]).code, 1);
+    assert_eq!(r.run(&["find", ".bar"]).code, 1);
+}

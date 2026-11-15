@@ -10,8 +10,10 @@ use std::{
 
 use crate::codec::Corrupt;
 use crate::extract::extract;
-use crate::index::{FileEntry, Index, LANG_BINARY, LANG_DELETED, Stamp, write_index};
+use crate::index::{FileEntry, Hit, Index, LANG_BINARY, LANG_DELETED, Stamp, write_index};
+use crate::intern::pack;
 use crate::lang::lang_of;
+use crate::refs::{REF_PLAIN, extract_refs};
 use crate::store::{LockTimeout, cache_dir, with_lock};
 use crate::walk::{Scanned, scan};
 
@@ -256,6 +258,7 @@ fn deleted(path: Vec<u8>) -> FileEntry {
         size: UNCONFIRMED,
         lang: LANG_DELETED,
         defs: Vec::new(),
+        refs: Vec::new(),
     }
 }
 
@@ -279,18 +282,27 @@ fn stamp_for(s: &Scanned, start: u64) -> (u64, u64) {
 fn entry_for(root: &Path, s: &Scanned, start: u64) -> io::Result<Option<FileEntry>> {
     let (mtime_ns, size) = stamp_for(s, start);
     let rel = Path::new(OsStr::from_bytes(&s.path));
-    let (lang, defs) = match lang_of(rel) {
-        None => (LANG_BINARY, Vec::new()),
+    let (lang, defs, refs) = match lang_of(rel) {
+        None => (LANG_BINARY, Vec::new(), Vec::new()),
         Some(lang) => {
             let bytes = match fs::read(root.join(rel)) {
                 Ok(b) => b,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(e) => return Err(e),
+                // 種類は `Fail::fresh` が終了コードを選ぶのに使うので保つ。
+                Err(e) => {
+                    let path = crate::query::escape_control(&s.path);
+                    let msg = format!("{}: {e}", String::from_utf8_lossy(&path));
+                    return Err(io::Error::new(e.kind(), msg));
+                }
             };
             if is_binary(&bytes) {
-                (LANG_BINARY, Vec::new())
+                (LANG_BINARY, Vec::new(), Vec::new())
             } else {
-                (lang as u8, extract(lang, &bytes))
+                let defs = extract(lang, &bytes);
+                let mut refs = extract_refs(lang, &bytes, &defs);
+                refs.retain(|r| r.kind != REF_PLAIN);
+                let refs = pack(&refs);
+                (lang as u8, defs, refs)
             }
         }
     };
@@ -300,6 +312,7 @@ fn entry_for(root: &Path, s: &Scanned, start: u64) -> io::Result<Option<FileEntr
         size,
         lang,
         defs,
+        refs,
     }))
 }
 
@@ -325,10 +338,8 @@ fn parse_all(root: &Path, items: &[&Scanned], start: u64) -> io::Result<Vec<Opti
     })
 }
 
-fn found(idx: &Index, name: &[u8], skip: impl Fn(&[u8]) -> bool) -> Result<Vec<Found>, Corrupt> {
-    Ok(idx
-        .lookup(name)?
-        .into_iter()
+fn found(idx: &Index, hits: Vec<Hit>, name: &[u8], skip: impl Fn(&[u8]) -> bool) -> Vec<Found> {
+    hits.into_iter()
         .filter(|h| !skip(&h.path))
         .map(|h| Found {
             name: name.to_vec(),
@@ -338,16 +349,32 @@ fn found(idx: &Index, name: &[u8], skip: impl Fn(&[u8]) -> bool) -> Result<Vec<F
             kind: h.row.kind,
             path: h.path,
         })
-        .collect())
+        .collect()
 }
 
 impl View {
     /// 差分区画に同じ経路があれば、本体の項目は隠れる（削除の印も同じ経路で隠す）。
     pub fn lookup(&self, name: &[u8]) -> Result<Vec<Found>, Corrupt> {
+        self.overlay(name, Index::lookup)
+    }
+
+    /// 呼び出し（`REF_CALL`）と継承（`REF_INHERIT`）の位置。索引には `REF_PLAIN` を入れない。
+    /// 重ね合わせと並びは `lookup` と同じ。
+    pub fn lookup_refs(&self, name: &[u8]) -> Result<Vec<Found>, Corrupt> {
+        self.overlay(name, Index::lookup_refs)
+    }
+
+    fn overlay(
+        &self,
+        name: &[u8],
+        get: impl Fn(&Index, &[u8]) -> Result<Vec<Hit>, Corrupt>,
+    ) -> Result<Vec<Found>, Corrupt> {
         let delta = self.delta.as_ref();
-        let mut out = found(&self.main, name, |p| delta.is_some_and(|d| d.has_path(p)))?;
+        let mut out = found(&self.main, get(&self.main, name)?, name, |p| {
+            delta.is_some_and(|d| d.has_path(p))
+        });
         if let Some(d) = delta {
-            out.extend(found(d, name, |_| false)?);
+            out.extend(found(d, get(d, name)?, name, |_| false));
         }
         out.sort_by(|a, b| (&a.path, a.line, a.col).cmp(&(&b.path, b.line, b.col)));
         Ok(out)

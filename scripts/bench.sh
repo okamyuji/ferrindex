@@ -12,13 +12,13 @@ BENCH="$(cd "$BENCH" && pwd)"
 # 利用者の本物の索引キャッシュに触れない
 export XDG_CACHE_HOME="$BENCH/cache"
 
-# 名前 | GitHub の repo | tag | find と rg で比べる三つの名前
+# 名前 | GitHub の repo | tag | find と rg で比べる三つの名前 | refs と callers で引くありふれた名前
 REPOS=(
-  "linux|torvalds/linux|v6.12|schedule printk mutex_lock"
-  "kubernetes|kubernetes/kubernetes|v1.31.0|NewController Validate Reconcile"
-  "vscode|microsoft/vscode|1.95.0|activate Disposable dispose"
-  "django|django/django|5.1|QuerySet get_queryset save"
-  "rails|rails/rails|v8.0.0|validates find_by render"
+  "linux|torvalds/linux|v6.12|schedule printk mutex_lock|mutex_lock"
+  "kubernetes|kubernetes/kubernetes|v1.31.0|NewController Validate Reconcile|Validate"
+  "vscode|microsoft/vscode|1.95.0|activate Disposable dispose|dispose"
+  "django|django/django|5.1|QuerySet get_queryset save|save"
+  "rails|rails/rails|v8.0.0|validates find_by render|render"
 )
 
 for tool in hyperfine rg python3 /usr/bin/time; do
@@ -41,14 +41,21 @@ find_target_ms() {
   else echo 500
   fi
 }
+# hyperfine の版で JSON の形が違う（times か measurements か）
+median_ms_of() {
+  python3 -I -c 'import json,statistics,sys; r=json.load(open(sys.argv[1]))["results"][0]; t=r["times"] if "times" in r else [x["time_wall_clock"]["value"] for x in r["measurements"]]; print(round(statistics.median(t)*1000,1))' "$1"
+}
 BUILD_LIMIT_S=60
+# refs と callers の目標は2回目以降の中央値。初回の時間は別の列に出す
+REFS_LIMIT_MS=1000
 RSS_LIMIT_MB=2048
 
 build_rows=()
 bytes_rows=()
+ref_rows=()
 
 for spec in "${REPOS[@]}"; do
-  IFS='|' read -r name repo tag names <<<"$spec"
+  IFS='|' read -r name repo tag names ref_name <<<"$spec"
   selected "$name" || continue
   dir="$BENCH/$name"
   if [ ! -d "$dir" ]; then
@@ -69,7 +76,7 @@ for spec in "${REPOS[@]}"; do
   first="${names%% *}"
   json="$(mktemp)"
   hyperfine -N --warmup 3 --runs 30 --export-json "$json" "\"$BIN\" find $first" >/dev/null
-  median_ms="$(python3 -I -c 'import json,statistics,sys; r=json.load(open(sys.argv[1]))["results"][0]; t=r["times"] if "times" in r else [x["time_wall_clock"]["value"] for x in r["measurements"]]; print(round(statistics.median(t)*1000,1))' "$json")"
+  median_ms="$(median_ms_of "$json")"
   rm -f "$json"
 
   target_ms="$(find_target_ms "$name" "$files")"
@@ -77,6 +84,19 @@ for spec in "${REPOS[@]}"; do
   python3 -I -c 'import sys; m,t,b,bl,r,rl=map(float,sys.argv[1:]); sys.exit(0 if m<=t and b<=bl and r<=rl else 1)' \
     "$median_ms" "$target_ms" "$build_s" "$BUILD_LIMIT_S" "$rss_mb" "$RSS_LIMIT_MB" || verdict=FAIL
   build_rows+=("| $name | $files | ${build_s} s | ${rss_mb} MB | $((index_bytes / 1024)) KB | ${median_ms} ms | <= ${target_ms} ms | $verdict |")
+
+  for sub in refs callers; do
+    t0="$(python3 -I -c 'import time; print(time.time())')"
+    count="$("$BIN" "$sub" "$ref_name" --limit 1000000 | wc -l | tr -d ' ')"
+    first_ms="$(python3 -I -c 'import sys,time; print(round((time.time()-float(sys.argv[1]))*1000))' "$t0")"
+    json="$(mktemp)"
+    hyperfine -N --warmup 1 --runs 10 --export-json "$json" "\"$BIN\" $sub $ref_name" >/dev/null
+    ref_ms="$(median_ms_of "$json")"
+    rm -f "$json"
+    ref_verdict=pass
+    python3 -I -c 'import sys; sys.exit(0 if float(sys.argv[1])<=float(sys.argv[2]) else 1)' "$ref_ms" "$REFS_LIMIT_MS" || ref_verdict=FAIL
+    ref_rows+=("| $name | $sub $ref_name | $count | ${first_ms} ms | ${ref_ms} ms | <= ${REFS_LIMIT_MS} ms | $ref_verdict |")
+  done
 
   for n in $names; do
     f_bytes="$("$BIN" find "$n" | wc -c | tr -d ' ')"
@@ -92,3 +112,7 @@ echo
 echo "| repo | name | ferrindex find (bytes) | rg -n (bytes) |"
 echo "|---|---|---|---|"
 printf '%s\n' "${bytes_rows[@]}"
+echo
+echo "| repo | command | lines | first run | median | target | result |"
+echo "|---|---|---|---|---|---|---|"
+printf '%s\n' "${ref_rows[@]}"

@@ -1,6 +1,8 @@
 use std::fs;
 
 use super::*;
+use crate::intern::pack;
+use crate::refs::Ref;
 
 fn def(name: &str, line: u32, container: Option<&str>) -> Def {
     Def {
@@ -20,15 +22,19 @@ fn entry(path: &str, defs: Vec<Def>) -> FileEntry {
         size: 4242,
         lang: 7,
         defs,
+        refs: Vec::new(),
     }
 }
 
 fn sample() -> Vec<FileEntry> {
     vec![
-        entry(
-            "src/b.rs",
-            vec![def("Alpha", 9, None), def("run", 12, Some("Alpha"))],
-        ),
+        FileEntry {
+            refs: vec![reference("Alpha", 14, 1, Some("run"))],
+            ..entry(
+                "src/b.rs",
+                vec![def("Alpha", 9, None), def("run", 12, Some("Alpha"))],
+            )
+        },
         entry(
             "src/a.rs",
             vec![def("Alpha", 1, None), def("zeta", 5, None)],
@@ -155,7 +161,18 @@ fn section_bytes_plus_header_is_the_file_size() {
     let ix = Index::open(&p).unwrap();
     let parts = ix.section_bytes();
     let names: Vec<&str> = parts.iter().map(|p| p.0).collect();
-    assert_eq!(names, ["paths", "names", "offsets", "postings", "stamps"]);
+    assert_eq!(
+        names,
+        [
+            "paths",
+            "names",
+            "offsets",
+            "postings",
+            "stamps",
+            "ref_offsets",
+            "ref_postings"
+        ]
+    );
     assert!(parts.iter().all(|p| p.1 > 0));
     let sum: usize = parts.iter().map(|p| p.1).sum();
     assert_eq!(sum + HEADER_LEN, ix.stats().bytes);
@@ -212,7 +229,7 @@ fn rewrite_replaces_and_leaves_no_temp_file() {
 
 #[test]
 fn format_constants_and_helpers() {
-    assert_eq!((HEADER_LEN, STAMP_LEN), (84, 17));
+    assert_eq!((HEADER_LEN, STAMP_LEN), (108, 17));
     assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
     assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
     assert!(fingerprint() > 1);
@@ -242,7 +259,7 @@ fn corrupt_section_detected() {
     let (_d, p) = written(&sample());
     let good = fs::read(&p).unwrap();
     let mut start = HEADER_LEN;
-    for i in 0..5 {
+    for i in 0..SECTION_COUNT {
         let len = u64::from_le_bytes(good[20 + i * 12..28 + i * 12].try_into().unwrap()) as usize;
         assert!(len > 0, "section {i} is empty");
         let mut flipped = good.clone();
@@ -279,7 +296,7 @@ fn truncation_and_trailing_bytes_are_detected() {
     assert!(is_corrupt(open_bytes(&longer)));
 }
 
-fn assembled(fp: u64, version: u32, s: &[Vec<u8>; 5]) -> Result<Index, OpenError> {
+fn assembled(fp: u64, version: u32, s: &[Vec<u8>; 7]) -> Result<Index, OpenError> {
     open_bytes(&assemble(fp, version, s))
 }
 
@@ -354,7 +371,7 @@ fn inconsistent_sections_are_corrupt() {
 fn lookup_reports_corrupt_postings() {
     let good = sections(&[entry("a", vec![def("x", 1, None)])]).unwrap();
     let end = u64::try_from(good[3].len()).unwrap();
-    let lookup = |s: &[Vec<u8>; 5]| {
+    let lookup = |s: &[Vec<u8>; 7]| {
         assembled(fingerprint(), FORMAT_VERSION, s)
             .unwrap()
             .lookup(b"x")
@@ -381,4 +398,124 @@ fn lookup_reports_corrupt_postings() {
     s[3] = vec![1, 0, 0, 0, 9];
     s[2] = [0u64, 5].iter().flat_map(|v| v.to_le_bytes()).collect();
     assert!(lookup(&s).is_err(), "container out of range");
+}
+
+fn reference(name: &str, line: u32, kind: u8, container: Option<&str>) -> PackedRef {
+    pack(&[Ref {
+        name: name.into(),
+        line,
+        col: 4,
+        kind,
+        container: container.map(Into::into),
+        container_at: None,
+    }])[0]
+}
+
+#[test]
+fn refs_roundtrip() {
+    let files = [
+        FileEntry {
+            refs: vec![
+                reference("Alpha", 20, 1, Some("run")),
+                reference("Alpha", 3, 2, None),
+            ],
+            ..entry(
+                "src/a.rs",
+                vec![def("Alpha", 1, None), def("run", 10, None)],
+            )
+        },
+        FileEntry {
+            refs: vec![reference("Alpha", 7, 0, None)],
+            ..entry("src/b.rs", vec![])
+        },
+    ];
+    let (_d, p) = written(&files);
+    let ix = Index::open(&p).unwrap();
+    let hits = ix.lookup_refs(b"Alpha").unwrap();
+    let got: Vec<_> = hits
+        .iter()
+        .map(|h| {
+            (
+                h.path.clone(),
+                h.row.line,
+                h.row.col,
+                h.row.kind,
+                ix.container_name(&h.row),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (b"src/a.rs".to_vec(), 3, 4, 2, None),
+            (b"src/a.rs".to_vec(), 20, 4, 1, Some(b"run".to_vec())),
+            (b"src/b.rs".to_vec(), 7, 4, 0, None),
+        ]
+    );
+    // 定義の posting に参照が混ざらない
+    assert_eq!(ix.lookup(b"Alpha").unwrap().len(), 1);
+    assert!(ix.lookup_refs(b"zeta").unwrap().is_empty());
+}
+
+#[test]
+fn ref_only_names_are_in_the_name_fst() {
+    let files = [FileEntry {
+        refs: vec![reference("external_fn", 5, 1, Some("caller"))],
+        ..entry("a.rs", vec![])
+    }];
+    let (_d, p) = written(&files);
+    let ix = Index::open(&p).unwrap();
+    assert_eq!(ix.lookup_refs(b"external_fn").unwrap().len(), 1);
+    assert!(ix.lookup(b"external_fn").unwrap().is_empty());
+    let hit = &ix.lookup_refs(b"external_fn").unwrap()[0];
+    assert_eq!(ix.container_name(&hit.row), Some(b"caller".to_vec()));
+}
+
+#[test]
+fn entries_restore_refs() {
+    let files = [FileEntry {
+        refs: vec![
+            reference("Alpha", 20, 1, Some("run")),
+            reference("beta", 2, 0, None),
+        ],
+        ..entry("a.rs", vec![def("Alpha", 1, None), def("run", 10, None)])
+    }];
+    let (_d, p) = written(&files);
+    let got = Index::open(&p).unwrap().entries().unwrap();
+    let mut refs = got[0].refs.clone();
+    refs.sort_by_key(|r| r.line);
+    assert_eq!(
+        refs,
+        files[0].refs.iter().rev().cloned().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn corrupt_ref_postings_are_reported() {
+    let good = sections(&[FileEntry {
+        refs: vec![reference("x", 1, 0, None)],
+        ..entry("a", vec![])
+    }])
+    .unwrap();
+    let lookup = |s: &[Vec<u8>; 7]| {
+        assembled(fingerprint(), FORMAT_VERSION, s)
+            .unwrap()
+            .lookup_refs(b"x")
+    };
+    assert_eq!(lookup(&good).unwrap().len(), 1);
+    let mut s = good.clone();
+    s[6] = vec![0xff; good[6].len()];
+    assert!(lookup(&s).is_err(), "garbage ref postings");
+    let mut s = good.clone();
+    s[5].extend_from_slice(&[0; 8]);
+    assert!(
+        is_corrupt(assembled(fingerprint(), FORMAT_VERSION, &s)),
+        "ref offsets too long"
+    );
+    let mut s = good.clone();
+    s[5] = [0u64, u64::try_from(good[6].len()).unwrap() + 1]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    assert!(lookup(&s).is_err(), "ref end past postings");
 }

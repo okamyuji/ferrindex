@@ -1,0 +1,810 @@
+//! `refs` `callers` `impls` `supers`。
+//! 索引は呼び出しと継承の参照だけを持つので、`callers` と `impls` は索引から、
+//! `supers` は定義のファイルから、`refs`（素の参照を含む）は実行時にファイルを読んで答える。
+//! `--precise` は定義の位置を言語サーバーに問い、調べられなければ名前一致に戻る。
+
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsStr,
+    fs,
+    io::{self, Write},
+    os::unix::ffi::OsStrExt,
+    path::{Component, Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+use crate::extract::{Def, extract};
+use crate::fresh::{Found, View, is_binary};
+use crate::lang::{Lang, kind_id, lang_of};
+use crate::lsp::{self, Location, Method};
+use crate::query::{
+    Ctx, Res, cached, corrupt, emit, escape_control, read_rel, resolve, resolve_exact, source_line,
+};
+use crate::refs::{REF_CALL, REF_INHERIT, REF_PLAIN, Ref, extract_refs};
+use crate::trust;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefKind {
+    Refs,
+    Callers,
+    Impls,
+    Supers,
+}
+
+/// 出力する 1 件。`path` は根からの相対。
+struct Hit {
+    path: Vec<u8>,
+    line: u32,
+    col: u32,
+    kind: u8,
+    container: Option<Vec<u8>>,
+}
+
+impl Hit {
+    fn new(path: &[u8], r: &Ref) -> Hit {
+        Hit {
+            path: path.to_vec(),
+            line: r.line,
+            col: r.col,
+            kind: r.kind,
+            container: r.container.as_ref().map(|c| c.clone().into_bytes()),
+        }
+    }
+}
+
+/// 3つ組は（何を調べるか、名前、言語サーバーに問うか）。
+pub(crate) fn run(
+    ctx: &Ctx,
+    view: &View,
+    (kind, term, precise): (RefKind, &str, bool),
+    limit: usize,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Res {
+    if !precise {
+        let mut found_err = Vec::new();
+        let found = name_match(ctx, view, kind, term, limit, out, &mut found_err)?;
+        if found && matches!(kind, RefKind::Callers | RefKind::Refs) {
+            ambiguity_note(ctx, view, term, err)?;
+        }
+        err.write_all(&found_err)?;
+        return Ok(found);
+    }
+    let why = match precise_lines(ctx, view, kind, term, limit)? {
+        Ok((lines, total)) if total > 0 => return emit(out, err, &lines, total),
+        // 読み込み途中のサーバーは0件と答えうるので、0件は確定とみなさない。
+        Ok(_) => "言語サーバーの答えが0件でした".to_string(),
+        // 理由にはサーバーが出した文字列が入りうるので、端末の制御文字を置き換える。
+        Err(why) => String::from_utf8_lossy(&escape_control(why.as_bytes())).into_owned(),
+    };
+    // Go の継承は名前一致では分からないので、戻る先が無い。理由だけを出す。
+    if matches!(kind, RefKind::Impls | RefKind::Supers)
+        && only_go(&resolve(view, term).map_err(|c| corrupt(c, ctx))?)
+    {
+        writeln!(err, "ferrindex: --precise: {why}")?;
+        return Ok(false);
+    }
+    let (mut found_out, mut found_err) = (Vec::new(), Vec::new());
+    let found = name_match(ctx, view, kind, term, limit, &mut found_out, &mut found_err)?;
+    writeln!(
+        err,
+        "ferrindex: --precise: {why}。名前一致の結果です（未確定）"
+    )?;
+    err.write_all(&found_err)?;
+    out.write_all(&found_out)?;
+    Ok(found)
+}
+
+fn name_match(
+    ctx: &Ctx,
+    view: &View,
+    kind: RefKind,
+    term: &str,
+    limit: usize,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Res {
+    let name = last_segment(term);
+    match kind {
+        RefKind::Callers => indexed(ctx, view, &name, REF_CALL, limit, out, err),
+        RefKind::Refs => refs(ctx, view, &name, limit, out, err),
+        RefKind::Impls | RefKind::Supers => {
+            let defs = resolve(view, term).map_err(|c| corrupt(c, ctx))?;
+            if only_go(&defs) {
+                writeln!(err, "{GO_NEEDS_PRECISE}")?;
+                Ok(false)
+            } else if kind == RefKind::Supers {
+                supers(ctx, defs, limit, out, err)
+            } else {
+                indexed(ctx, view, &name, REF_INHERIT, limit, out, err)
+            }
+        }
+    }
+}
+
+/// 名前一致は呼び先の定義を区別しない。結果をそのまま答えに使われないよう、混ざりうるときに知らせる。
+fn ambiguity_note(ctx: &Ctx, view: &View, term: &str, err: &mut impl Write) -> Res<()> {
+    let name = last_segment(term);
+    // 未信頼では --precise もサーバーを起動しない。Claude は trust を実行できないので、利用者の手順を示す。
+    // 一覧が読めなくても名前一致の結果は返す。読めない理由は --precise が示す。
+    let how = if trust::is_trusted(&ctx.root).unwrap_or(false) {
+        "絞るには --precise を使ってください"
+    } else {
+        "絞るには、利用者が端末で `ferrindex trust` を実行してから --precise を使います"
+    };
+    if name != term {
+        writeln!(
+            err,
+            "ferrindex: 名前一致では {term} の修飾を使わず、{name} の呼び出しをすべて出します。{how}"
+        )?;
+        return Ok(());
+    }
+    let section = kind_id("section");
+    let defs = resolve_exact(view, &name)
+        .map_err(|c| corrupt(c, ctx))?
+        .iter()
+        .filter(|d| d.kind != section)
+        .count();
+    if defs > 1 {
+        writeln!(
+            err,
+            "ferrindex: {name} の定義が{defs}件あります。名前一致なので、どの定義への呼び出しかを区別しません。{how}"
+        )?;
+    }
+    Ok(())
+}
+
+const GO_NEEDS_PRECISE: &str =
+    "ferrindex: Go のインターフェースの実装は名前一致では分かりません。--precise を使ってください";
+
+/// Go は型がインターフェースを暗黙に満たすので、名前では継承の関係が分からない。
+fn only_go(defs: &[Found]) -> bool {
+    !defs.is_empty()
+        && defs
+            .iter()
+            .all(|d| lang_of(Path::new(OsStr::from_bytes(&d.path))) == Some(Lang::Go))
+}
+
+/// `Foo.bar` と `Foo::bar` は `bar` を探す。`resolve` と同じ分け方にする。
+fn last_segment(term: &str) -> String {
+    let dotted = term.replace("::", ".");
+    match dotted.rsplit_once('.') {
+        Some((c, n)) if !c.is_empty() && !n.is_empty() => n.to_string(),
+        _ => dotted,
+    }
+}
+
+/// 同名の定義ごとにサーバーを起動するので、問い合わせる定義の数を抑える。
+const PRECISE_MAX_DEFS: usize = 5;
+/// 定義が複数でも、すべての問い合わせを合わせた待ちの上限。
+const PRECISE_WAIT: Duration = Duration::from_secs(30);
+
+/// 表示する行と、表示できる答えの総数。
+type Shown = (Vec<Vec<u8>>, usize);
+
+/// 言語サーバーの答えのうち `limit` 件を出力の行にし、表示できる答えの総数を添える。
+/// 調べられなければ理由を返す（呼び手は名前一致に戻る）。
+fn precise_lines(
+    ctx: &Ctx,
+    view: &View,
+    kind: RefKind,
+    term: &str,
+    limit: usize,
+) -> Res<Result<Shown, String>> {
+    if !trust::is_trusted(&ctx.root)? {
+        return Ok(Err(
+            "このリポジトリは信頼されていません。`ferrindex trust` を端末で実行すると使えます"
+                .to_string(),
+        ));
+    }
+    let mut defs = resolve_exact(view, term).map_err(|c| corrupt(c, ctx))?;
+    // Markdown の見出しには言語サーバーが無い。コードの定義だけを問う。
+    let section = kind_id("section");
+    defs.retain(|d| d.kind != section);
+    if defs.is_empty() {
+        return Ok(Err(format!("{term}の定義が見つかりません")));
+    }
+    // 修飾の無い名前の呼び出しは、どれもその名前のどれかの定義を指すはず。修飾した名前でも
+    // 修飾の無い名前の定義すべてに問うて網羅を確かめ、修飾した定義（`asked` の先頭）の答えだけを出す。
+    let checks_calls = matches!(kind, RefKind::Refs | RefKind::Callers);
+    let name = if checks_calls {
+        last_segment(term)
+    } else {
+        term.to_string()
+    };
+    let mut asked = defs.clone();
+    if name != term {
+        let mut more = resolve_exact(view, &name).map_err(|c| corrupt(c, ctx))?;
+        more.retain(|d| d.kind != section && !defs.contains(d));
+        asked.extend(more);
+    }
+    if asked.len() > PRECISE_MAX_DEFS {
+        return Ok(Err(format!(
+            "{name}の定義が{}件あり、問い合わせる上限の{PRECISE_MAX_DEFS}件を超えます",
+            asked.len()
+        )));
+    }
+    let method = match kind {
+        RefKind::Refs => Method::References,
+        RefKind::Callers => Method::IncomingCalls,
+        RefKind::Impls => Method::Implementation,
+        RefKind::Supers => Method::Supertypes,
+    };
+    let deadline = Instant::now() + PRECISE_WAIT;
+    let (mut found, mut all) = (Vec::new(), Vec::new());
+    for (i, d) in asked.iter().enumerate() {
+        let file = Path::new(OsStr::from_bytes(&d.path));
+        // 索引の定義はどれも言語の決まるファイルにある。Markdown はサーバーが無いと答える。
+        let lang = lang_of(file).unwrap_or(Lang::Markdown);
+        match lsp::query(&ctx.root, lang, file, d.line, d.col, method, deadline) {
+            Ok(locs) => {
+                if i < defs.len() {
+                    found.extend(locs.iter().cloned());
+                }
+                all.extend(locs);
+            }
+            Err(e) => return Ok(Err(format!("{}: {e}", lsp::server_name(lang)))),
+        }
+    }
+    let root = canonical_root(ctx);
+    // `<根>/../x` も `strip_prefix` を通るので、`..` を含む位置は根の外として捨てる。
+    found.retain(|l| inside(&root, &l.path));
+    all.retain(|l| inside(&root, &l.path));
+    if kind == RefKind::Refs {
+        // solargraph は includeDeclaration: false でも定義の名前の位置を返す。
+        found.retain(|l| {
+            !asked.iter().any(|d| {
+                (l.line, l.col) == (d.line, d.col)
+                    && l.path
+                        .strip_prefix(&root)
+                        .is_ok_and(|r| r.as_os_str().as_bytes() == d.path)
+            })
+        });
+    }
+    found.sort();
+    found.dedup();
+    if checks_calls
+        && !found.is_empty()
+        && misses_a_call(view, &name, &root, &all).map_err(|c| corrupt(c, ctx))?
+    {
+        return Ok(Err(
+            "言語サーバーが取り込みや別名経由の呼び出しを返していません".to_string(),
+        ));
+    }
+    if matches!(kind, RefKind::Impls | RefKind::Supers) && !found.is_empty() {
+        let types = types_at(ctx, &root, &found)?;
+        if misses_an_inherit(ctx, view, kind, term, &defs, &types)? {
+            return Ok(Err("言語サーバーが継承の一部を返していません".to_string()));
+        }
+        // 問うた型そのものを実装として返すサーバーがある。
+        let queried: HashSet<(&[u8], &[u8])> =
+            defs.iter().map(|d| (&d.path[..], &d.name[..])).collect();
+        let is_queried = |t: &Option<(Vec<u8>, String)>| {
+            t.as_ref()
+                .is_some_and(|(p, n)| queried.contains(&(&p[..], n.as_bytes())))
+        };
+        found = found
+            .into_iter()
+            .zip(&types)
+            .filter(|(_, t)| kind == RefKind::Supers || !is_queried(t))
+            .map(|(l, _)| l)
+            .collect();
+    }
+    let plain = match kind {
+        RefKind::Refs => REF_PLAIN,
+        RefKind::Callers => REF_CALL,
+        RefKind::Impls | RefKind::Supers => REF_INHERIT,
+    };
+    Ok(Ok(located(ctx, &root, &found, plain, limit)?))
+}
+
+/// 型の定義の（パス、名前）。
+type TypeAt = Option<(Vec<u8>, String)>;
+
+/// 各位置の型（その位置に名前のある定義、無ければ囲む最も内側の定義）の（パス、名前）。
+/// サーバーは型の名前の位置（Dart の analysis server）か、宣言の先頭を返す。
+fn types_at(ctx: &Ctx, root: &Path, found: &[Location]) -> Res<Vec<TypeAt>> {
+    let mut parsed: HashMap<PathBuf, Option<Parsed>> = HashMap::new();
+    found
+        .iter()
+        .map(|loc| {
+            let Ok(rel) = loc.path.strip_prefix(root) else {
+                return Ok(None);
+            };
+            let Some(real) = real_rel(root, rel)? else {
+                return Ok(None);
+            };
+            let Some((src, defs, _, starts)) =
+                cached(&mut parsed, real.clone(), || parse(ctx, &real))?.as_ref()
+            else {
+                return Ok(None);
+            };
+            let offset = byte_offset(src, starts, loc.line, loc.col);
+            let def = defs
+                .iter()
+                .find(|d| (d.line, d.col) == (loc.line, loc.col))
+                .or_else(|| {
+                    defs.iter()
+                        .filter(|d| d.body.contains(&offset))
+                        .min_by_key(|d| d.body.len())
+                });
+            Ok(def.map(|def| (rel.as_os_str().as_bytes().to_vec(), def.name.clone())))
+        })
+        .collect()
+}
+
+/// 名前一致の継承の行に、答えの型に無いものがあるか。impls は各行の（ファイル、囲む型）、
+/// supers は問うた型の各基底の名前で比べる。impls の修飾した名前は、継承の行がどの定義を
+/// 指すか名前では分からないので確かめない。
+fn misses_an_inherit(
+    ctx: &Ctx,
+    view: &View,
+    kind: RefKind,
+    term: &str,
+    defs: &[Found],
+    types: &[Option<(Vec<u8>, String)>],
+) -> Res<bool> {
+    let answered: HashSet<(&[u8], &str)> = types
+        .iter()
+        .flatten()
+        .map(|(p, n)| (&p[..], n.as_str()))
+        .collect();
+    if kind == RefKind::Supers {
+        let names: HashSet<&str> = answered.iter().map(|&(_, n)| n).collect();
+        return Ok(bases(ctx, defs)?
+            .iter()
+            .any(|b| !names.contains(b.as_str())));
+    }
+    if last_segment(term) != term {
+        return Ok(false);
+    }
+    let refs = view
+        .lookup_refs(term.as_bytes())
+        .map_err(|c| corrupt(c, ctx))?;
+    Ok(refs.iter().any(|f| {
+        f.kind == REF_INHERIT
+            && !f.container.as_ref().is_some_and(|c| {
+                answered.contains(&(&f.path[..], String::from_utf8_lossy(c).as_ref()))
+            })
+    }))
+}
+
+/// 定義のファイルを抽出し直して求めた、各定義の基底の名前。
+fn bases(ctx: &Ctx, defs: &[Found]) -> Res<Vec<String>> {
+    let mut out = Vec::new();
+    for d in defs {
+        let Some((_, _, refs, _)) = parse(ctx, Path::new(OsStr::from_bytes(&d.path)))? else {
+            continue;
+        };
+        let owners = Owners::of([d]);
+        out.extend(refs.into_iter().filter(|r| owners.owns(r)).map(|r| r.name));
+    }
+    Ok(out)
+}
+
+/// symlink を解決したパスの、根からの相対。根の外か、無いファイルなら None。答えのファイルは
+/// このパスで読み、symlink で根の外を指す位置は読まずに捨てる。
+fn real_rel(root: &Path, rel: &Path) -> Res<Option<PathBuf>> {
+    match fs::canonicalize(root.join(rel)) {
+        Ok(real) => Ok(real.strip_prefix(root).ok().map(Path::to_path_buf)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            let path = escape_control(rel.as_os_str().as_bytes());
+            let msg = format!("{}: {e}", String::from_utf8_lossy(&path));
+            Err(io::Error::new(e.kind(), msg).into())
+        }
+    }
+}
+
+fn inside(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .is_ok_and(|rel| !rel.components().any(|c| c == Component::ParentDir))
+}
+
+/// サーバーは正規化したパスで答える。
+fn canonical_root(ctx: &Ctx) -> PathBuf {
+    fs::canonicalize(&ctx.root).unwrap_or_else(|_| ctx.root.clone())
+}
+
+/// 名前一致の呼び出しに、全定義の答えを合わせたものに無い位置があるか。あれば、サーバーは
+/// `require` の分割代入、別名、型を推論できない受け手を経た呼び出しを追えていない。
+fn misses_a_call(
+    view: &View,
+    name: &str,
+    root: &Path,
+    found: &[Location],
+) -> Result<bool, crate::codec::Corrupt> {
+    let answered: HashSet<(&[u8], u32, u32)> = found
+        .iter()
+        .filter_map(|l| {
+            let rel = l.path.strip_prefix(root).ok()?;
+            Some((rel.as_os_str().as_bytes(), l.line, l.col))
+        })
+        .collect();
+    Ok(view
+        .lookup_refs(name.as_bytes())?
+        .iter()
+        .any(|f| f.kind == REF_CALL && !answered.contains(&(&f.path[..], f.line, f.col))))
+}
+
+/// 位置ごとにファイルを抽出し直し、その位置の参照の種類と、囲む最も内側の定義を添える。
+/// 作業ツリーの外の位置（依存ライブラリなど）と、ファイルが無い位置は出さない。それ以外で読めない
+/// 位置は、パスを添えたエラーにする。`limit` 件を超えた分は
+/// 整形せずに数える。整形は位置ごとにファイルを先頭から数え、ソース行を写すので重い。
+fn located(ctx: &Ctx, root: &Path, found: &[Location], plain: u8, limit: usize) -> Res<Shown> {
+    let mut parsed: HashMap<PathBuf, Option<Parsed>> = HashMap::new();
+    let (mut lines, mut total) = (Vec::new(), 0);
+    for loc in found {
+        let Ok(rel) = loc.path.strip_prefix(root) else {
+            continue;
+        };
+        let Some(real) = real_rel(root, rel)? else {
+            continue;
+        };
+        let Some((src, defs, refs, starts)) =
+            cached(&mut parsed, real.clone(), || parse(ctx, &real))?
+        else {
+            continue;
+        };
+        total += 1;
+        if lines.len() == limit {
+            continue;
+        }
+        let at = (loc.line, loc.col);
+        let kind = refs
+            .iter()
+            .find(|r| (r.line, r.col) == at)
+            .map_or(plain, |r| r.kind);
+        let offset = byte_offset(src, starts, loc.line, loc.col);
+        // 位置が定義の名前そのもの（impls や supers の答え）なら、その定義は囲みに数えない。
+        let container = defs
+            .iter()
+            .filter(|d| d.body.contains(&offset) && (d.line, d.col) != at)
+            .min_by_key(|d| d.body.len())
+            .map(|d| d.name.clone().into_bytes());
+        let hit = Hit {
+            path: rel.as_os_str().as_bytes().to_vec(),
+            line: loc.line,
+            col: loc.col,
+            kind,
+            container,
+        };
+        lines.push(render(ctx, &hit, Some(src)));
+    }
+    Ok((lines, total))
+}
+
+/// ファイルの内容と、抽出し直した定義と参照と、各行の先頭のバイト位置。
+type Parsed = (Vec<u8>, Vec<Def>, Vec<Ref>, Vec<usize>);
+
+/// 言語の決まらないファイル（サーバーが返した設定ファイルなど）は、定義と参照を空にして行だけ出す。
+fn parse(ctx: &Ctx, rel: &Path) -> Res<Option<Parsed>> {
+    let Some(src) = read_rel(&ctx.root, rel.as_os_str().as_bytes())? else {
+        return Ok(None);
+    };
+    let starts = line_starts(&src);
+    let Some(lang) = lang_of(rel) else {
+        return Ok(Some((src, Vec::new(), Vec::new(), starts)));
+    };
+    let defs = extract(lang, &src);
+    let refs = extract_refs(lang, &src, &defs);
+    Ok(Some((src, defs, refs, starts)))
+}
+
+fn line_starts(src: &[u8]) -> Vec<usize> {
+    let ends = src.iter().enumerate().filter(|&(_, &b)| b == b'\n');
+    std::iter::once(0).chain(ends.map(|(i, _)| i + 1)).collect()
+}
+
+/// 1 始まりの行と、1 始まりで UTF-16 単位の列を、バイト位置にする。`starts` は line_starts の値。
+/// 答えの全件について呼ぶので、その行の中だけを数える。
+fn byte_offset(src: &[u8], starts: &[usize], line: u32, col: u32) -> usize {
+    let at = line.saturating_sub(1) as usize;
+    let Some(&start) = starts.get(at) else {
+        return src.len();
+    };
+    let end = starts.get(at + 1).map_or(src.len(), |&next| next - 1);
+    let text = String::from_utf8_lossy(&src[start..end]);
+    let mut units = 1;
+    for (i, c) in text.char_indices() {
+        if units >= col as usize {
+            return start + i;
+        }
+        units += c.len_utf16();
+    }
+    end
+}
+
+fn kind_word(kind: u8) -> &'static str {
+    match kind {
+        REF_CALL => "call",
+        REF_INHERIT => "inherit",
+        _ => "ref",
+    }
+}
+
+/// `path:line:col kind in container\tソース行`。コンテナと行が無ければその部分を省く。
+fn render(ctx: &Ctx, h: &Hit, src: Option<&[u8]>) -> Vec<u8> {
+    let mut l = ctx.display(&h.path);
+    l.extend(format!(":{}:{} {}", h.line, h.col, kind_word(h.kind)).bytes());
+    if let Some(c) = &h.container {
+        l.extend(b" in ");
+        l.extend(escape_control(c));
+    }
+    if let Some(text) = src.and_then(|t| source_line(t, h.line)) {
+        l.push(b'\t');
+        l.extend(text);
+    }
+    l
+}
+
+fn indexed(
+    ctx: &Ctx,
+    view: &View,
+    name: &str,
+    kind: u8,
+    limit: usize,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Res {
+    let mut found = view
+        .lookup_refs(name.as_bytes())
+        .map_err(|c| corrupt(c, ctx))?;
+    found.retain(|f| f.kind == kind);
+    let mut texts: HashMap<&[u8], Option<Vec<u8>>> = HashMap::new();
+    let lines: Vec<Vec<u8>> = found
+        .iter()
+        .take(limit)
+        .map(|f| {
+            let src = cached(&mut texts, &f.path, || read_rel(&ctx.root, &f.path))?;
+            let hit = Hit {
+                path: f.path.clone(),
+                line: f.line,
+                col: f.col,
+                kind: f.kind,
+                container: f.container.clone(),
+            };
+            Ok(render(ctx, &hit, src.as_deref()))
+        })
+        .collect::<Res<_>>()?;
+    emit(out, err, &lines, found.len())
+}
+
+/// 定義の基底を指す継承参照を見分ける。囲む定義から決まる参照は定義の位置で比べ、同名の入れ子の
+/// 型を区別する。`impl Trait for Type` の参照は型の名前で比べる。参照ごとに定義を総当たりすると、
+/// 同名の型が大量にあるファイルで定義数×参照数になるので、集合で引く。
+struct Owners<'a> {
+    at: HashSet<(u32, u32)>,
+    names: HashSet<&'a [u8]>,
+}
+
+impl<'a> Owners<'a> {
+    fn of(defs: impl IntoIterator<Item = &'a Found>) -> Self {
+        let (mut at, mut names) = (HashSet::new(), HashSet::new());
+        for d in defs {
+            at.insert((d.line, d.col));
+            names.insert(d.name.as_slice());
+        }
+        Owners { at, names }
+    }
+
+    fn owns(&self, r: &Ref) -> bool {
+        r.kind == REF_INHERIT
+            && match r.container_at {
+                Some(at) => self.at.contains(&at),
+                None => r
+                    .container
+                    .as_deref()
+                    .is_some_and(|c| self.names.contains(c.as_bytes())),
+            }
+    }
+}
+
+/// 定義のファイルを今の内容で取り直し、定義の名前を囲みに持つ継承参照を出す。
+/// 同じファイルの同名の型は同じ `impl` の参照を共有するので、参照はファイルごとに一度だけ見る。
+fn supers(
+    ctx: &Ctx,
+    defs: Vec<Found>,
+    limit: usize,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Res {
+    // 出力の順を定義の順に保つため、ファイルの並びは初めて現れた順にする。
+    let mut by_file: Vec<(&[u8], Vec<&Found>)> = Vec::new();
+    let mut slot: HashMap<&[u8], usize> = HashMap::new();
+    for d in &defs {
+        let i = *slot.entry(&d.path).or_insert_with(|| {
+            by_file.push((&d.path, Vec::new()));
+            by_file.len() - 1
+        });
+        by_file[i].1.push(d);
+    }
+    let (mut lines, mut total) = (Vec::new(), 0);
+    for (path, ds) in by_file {
+        let Some((src, _, refs, _)) = parse(ctx, Path::new(OsStr::from_bytes(path)))? else {
+            continue;
+        };
+        let owners = Owners::of(ds);
+        for r in refs.iter().filter(|r| owners.owns(r)) {
+            total += 1;
+            if lines.len() < limit {
+                lines.push(render(ctx, &Hit::new(path, r), Some(&src)));
+            }
+        }
+    }
+    emit(out, err, &lines, total)
+}
+
+/// 名前のバイト列を含むテキストファイル。大きすぎるファイルは `view.files()` が既に除いている。
+fn candidate(ctx: &Ctx, path: &[u8], needle: &[u8]) -> Res<Option<(Lang, Vec<u8>)>> {
+    let Some(lang) = lang_of(Path::new(OsStr::from_bytes(path))) else {
+        return Ok(None);
+    };
+    let Some(src) = read_rel(&ctx.root, path)? else {
+        return Ok(None);
+    };
+    Ok((!is_binary(&src) && contains(&src, needle)).then_some((lang, src)))
+}
+
+/// 1 スレッドあたりに一度に渡すファイル数。`limit` に届いた後に無駄に読む分の上限になる。
+const FILES_PER_THREAD: usize = 16;
+
+/// 経路順の塊ごとに、候補の読み込みと解析をスレッドで分ける。`limit` 行に届いた塊の終わりで止め、
+/// 残りは読まない。
+fn refs(
+    ctx: &Ctx,
+    view: &View,
+    name: &str,
+    limit: usize,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Res {
+    let files: Vec<Vec<u8>> = view.files().into_iter().map(|(p, _)| p).collect();
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let (mut lines, mut count, mut next) = (Vec::new(), 0, 0);
+    while next < files.len() && count < limit {
+        let end = files.len().min(next + threads * FILES_PER_THREAD);
+        for (path, src, found) in scan_chunk(ctx, &files[next..end], name, threads)? {
+            // 上限を超えた分は整形せずに数える。整形は行ごとにソース行を写すので重い。
+            let room = limit.saturating_sub(lines.len());
+            lines.extend(
+                found
+                    .iter()
+                    .take(room)
+                    .map(|r| render(ctx, &Hit::new(path, r), Some(&src))),
+            );
+            count += found.len();
+        }
+        next = end;
+    }
+    // 読んだ塊の中の超過行は数えない。残りのファイルがあるとき、件数は下限にしかならない。
+    let unread = next < files.len();
+    let total = if unread { limit.min(count) } else { count };
+    let found = emit(out, err, &lines, total)?;
+    if unread {
+        writeln!(err, "… more files may match")?;
+    }
+    Ok(found)
+}
+
+/// ファイルの（パス、内容、名前の参照）。
+type FileRefs<'a> = (&'a [u8], Vec<u8>, Vec<Ref>);
+
+/// 名前の参照を持つファイルを経路順のまま返す。読めないファイルがあれば、
+/// 経路順で最初のものの失敗。
+fn scan_chunk<'a>(
+    ctx: &Ctx,
+    files: &'a [Vec<u8>],
+    name: &str,
+    threads: usize,
+) -> Res<Vec<FileRefs<'a>>> {
+    let per = files.len().div_ceil(threads).max(1);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = files
+            .chunks(per)
+            .map(|part| {
+                s.spawn(move || {
+                    let mut found = Vec::new();
+                    for p in part {
+                        if let Some((src, refs)) = scan_file(ctx, p, name)? {
+                            found.push((&p[..], src, refs));
+                        }
+                    }
+                    Res::Ok(found)
+                })
+            })
+            .collect();
+        let mut found = Vec::new();
+        for h in handles {
+            found.extend(h.join().expect("scan thread panicked")?);
+        }
+        Ok(found)
+    })
+}
+
+fn scan_file(ctx: &Ctx, path: &[u8], name: &str) -> Res<Option<(Vec<u8>, Vec<Ref>)>> {
+    let Some((lang, src)) = candidate(ctx, path, name.as_bytes())? else {
+        return Ok(None);
+    };
+    let defs = extract(lang, &src);
+    let mut refs = extract_refs(lang, &src, &defs);
+    refs.retain(|r| r.name == name);
+    Ok((!refs.is_empty()).then_some((src, refs)))
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    let Some((&first, rest)) = needle.split_first() else {
+        return true;
+    };
+    let mut from = 0;
+    while let Some(p) = hay[from..].iter().position(|&b| b == first) {
+        from += p + 1;
+        if hay[from..].starts_with(rest) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contains_finds_needles_at_every_position() {
+        assert!(contains(b"abc", b"abc"));
+        assert!(contains(b"xabc", b"abc"));
+        assert!(contains(b"aabc", b"abc"));
+        assert!(contains(b"abcx", b"c"));
+        assert!(contains(b"abc", b""));
+        assert!(!contains(b"abx", b"abc"));
+        assert!(!contains(b"ab", b"abc"));
+        assert!(!contains(b"", b"a"));
+    }
+
+    #[test]
+    fn last_segment_splits_on_dot_and_double_colon() {
+        assert_eq!(last_segment("bar"), "bar");
+        assert_eq!(last_segment("Foo.bar"), "bar");
+        assert_eq!(last_segment("a::b::c"), "c");
+        assert_eq!(last_segment("Foo."), "Foo.");
+        assert_eq!(last_segment(".bar"), ".bar");
+    }
+
+    #[test]
+    fn byte_offset_counts_utf16_columns() {
+        let src = "ab\n\u{3042}\u{1F600}x\n".as_bytes();
+        let at = |line, col| byte_offset(src, &line_starts(src), line, col);
+        assert_eq!(at(1, 1), 0);
+        assert_eq!(at(1, 2), 1);
+        assert_eq!(at(2, 1), 3);
+        assert_eq!(at(2, 2), 6);
+        // 絵文字は UTF-16 で 2 単位、UTF-8 で 4 バイト。
+        assert_eq!(at(2, 4), 10);
+        // 行末より右の列は行末に寄せる。
+        assert_eq!(at(1, 9), 2);
+        assert_eq!(at(9, 1), src.len());
+        assert_eq!(at(3, 5), src.len());
+        // 行 0 は行 1 と同じに扱う。
+        assert_eq!(at(0, 2), 1);
+        // 改行で終わらない最後の行の行末は、ファイルの末尾。
+        let tail = b"ab\ncd";
+        assert_eq!(byte_offset(tail, &line_starts(tail), 2, 9), tail.len());
+    }
+
+    #[test]
+    fn inside_rejects_paths_that_leave_the_root() {
+        let root = Path::new("/r");
+        assert!(inside(root, Path::new("/r/a/b.rs")));
+        assert!(!inside(root, Path::new("/r/../x.rs")));
+        assert!(!inside(root, Path::new("/r/a/../../x.rs")));
+        assert!(!inside(root, Path::new("/other/x.rs")));
+    }
+
+    #[test]
+    fn kind_words() {
+        assert_eq!(kind_word(REF_CALL), "call");
+        assert_eq!(kind_word(REF_INHERIT), "inherit");
+        assert_eq!(kind_word(0), "ref");
+    }
+}

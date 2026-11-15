@@ -1,9 +1,10 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     ffi::{OsStr, OsString},
     fmt::Display,
     fs,
-    io::{self, Write},
+    hash::Hash,
+    io::{self, IsTerminal, Write},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
@@ -13,8 +14,11 @@ use crate::describe::{description, tokens};
 use crate::extract::extract;
 use crate::fresh::{self, Found, View, is_binary};
 use crate::index::contains_ignore_ascii_case;
-use crate::lang::{kind_name, lang_of};
+use crate::lang::{Lang, kind_name, lang_of};
+use crate::lsp;
+use crate::refcmd::{self, RefKind};
 use crate::store::find_root;
+use crate::trust;
 use crate::walk::MAX_FILE_BYTES;
 
 const EXIT_NONE: u8 = 1;
@@ -28,9 +32,9 @@ const SHOW_LIMIT: usize = 3;
 const MAP_LIMIT: usize = 200;
 const SHOW_MAX_LINES: usize = 200;
 
-const USAGE: &str = "usage: ferrindex update [--rebuild] [--stats] | find <name> [--limit N] | files <substr> [--limit N] | outline <file> | show <name> [--limit N] | map [<dir>] [--limit N]";
+const USAGE: &str = "usage: ferrindex update [--rebuild] [--stats] | trust | untrust | servers | find <name> [--limit N] | files <substr> [--limit N] | outline <file> | show <name> [--limit N] | map [<dir>] [--limit N] | refs <name> [--limit N] [--precise] | callers <name> [--limit N] [--precise] | impls <name> [--limit N] [--precise] | supers <name> [--limit N] [--precise]";
 
-struct Fail {
+pub(crate) struct Fail {
     code: u8,
     msg: String,
 }
@@ -79,20 +83,28 @@ impl From<io::Error> for Fail {
     }
 }
 
-type Res<T = bool> = Result<T, Fail>;
+pub(crate) type Res<T = bool> = Result<T, Fail>;
 
 enum Cmd {
-    Update { rebuild: bool, stats: bool },
+    Update {
+        rebuild: bool,
+        stats: bool,
+    },
     Find(String),
     Files(String),
     Outline(PathBuf),
     Show(String),
     Map(Option<PathBuf>),
+    Refs(RefKind, String),
+    /// `--precise` に言語サーバーの起動を許すか。
+    Trust(bool),
+    Servers,
 }
 
 struct Cli {
     cmd: Cmd,
     limit: Option<usize>,
+    precise: bool,
 }
 
 fn term(arg: &OsStr) -> Res<String> {
@@ -110,6 +122,7 @@ struct Flags {
     limit: Option<usize>,
     rebuild: bool,
     stats: bool,
+    precise: bool,
 }
 
 /// フラグを取り除いた位置引数を返す。
@@ -122,6 +135,7 @@ fn split_flags(rest: &[OsString]) -> Res<(Flags, Vec<&OsString>)> {
             Some("--limit") => flags.limit = Some(limit_value(it.next())?),
             Some("--rebuild") => flags.rebuild = true,
             Some("--stats") => flags.stats = true,
+            Some("--precise") => flags.precise = true,
             Some(f) if f.starts_with("--") => {
                 return Err(Fail::usage(format!("unknown flag {f}")));
             }
@@ -145,9 +159,22 @@ fn command(name: &OsStr, pos: &[&OsString], flags: &Flags) -> Res<Cmd> {
         (Some("files"), [t]) => Cmd::Files(term(t)?),
         (Some("show"), [t]) => Cmd::Show(term(t)?),
         (Some("outline"), [f]) => Cmd::Outline(PathBuf::from(f)),
+        (Some("refs"), [t]) => Cmd::Refs(RefKind::Refs, term(t)?),
+        (Some("callers"), [t]) => Cmd::Refs(RefKind::Callers, term(t)?),
+        (Some("impls"), [t]) => Cmd::Refs(RefKind::Impls, term(t)?),
+        (Some("supers"), [t]) => Cmd::Refs(RefKind::Supers, term(t)?),
         (Some("map"), []) => Cmd::Map(None),
         (Some("map"), [d]) => Cmd::Map(Some(PathBuf::from(d))),
-        (Some("update" | "find" | "files" | "show" | "outline" | "map"), _) => {
+        (Some("trust"), []) => Cmd::Trust(true),
+        (Some("untrust"), []) => Cmd::Trust(false),
+        (Some("servers"), []) => Cmd::Servers,
+        (
+            Some(
+                "update" | "find" | "files" | "show" | "outline" | "map" | "refs" | "callers"
+                | "impls" | "supers" | "trust" | "untrust" | "servers",
+            ),
+            _,
+        ) => {
             return Err(Fail::usage("wrong number of arguments"));
         }
         _ => return Err(Fail::usage("unknown subcommand")),
@@ -164,12 +191,20 @@ fn parse(args: &[OsString]) -> Res<Cli> {
     if (flags.rebuild || flags.stats) && !update {
         return Err(Fail::usage("--rebuild and --stats belong to update"));
     }
-    if flags.limit.is_some() && (update || matches!(cmd, Cmd::Outline(_))) {
+    if flags.limit.is_some()
+        && (update || matches!(cmd, Cmd::Outline(_) | Cmd::Trust(_) | Cmd::Servers))
+    {
         return Err(Fail::usage("--limit does not apply to this subcommand"));
+    }
+    if flags.precise && !matches!(cmd, Cmd::Refs(..)) {
+        return Err(Fail::usage(
+            "--precise belongs to refs, callers, impls and supers",
+        ));
     }
     Ok(Cli {
         cmd,
         limit: flags.limit,
+        precise: flags.precise,
     })
 }
 
@@ -190,8 +225,8 @@ pub fn run(args: &[OsString], cwd: &Path, out: &mut impl Write, err: &mut impl W
 }
 
 /// 検索の前後で変わらない情報。表示する経路は、cwd が根の下にあれば cwd からの相対にする。
-struct Ctx {
-    root: PathBuf,
+pub(crate) struct Ctx {
+    pub(crate) root: PathBuf,
     cwd: PathBuf,
     prefix: Vec<u8>,
     hint: String,
@@ -215,20 +250,53 @@ impl Ctx {
         fresh::refresh(&self.root).map_err(|e| Fail::fresh(e, &self.hint))
     }
 
-    fn display(&self, path: &[u8]) -> Vec<u8> {
+    pub(crate) fn display(&self, path: &[u8]) -> Vec<u8> {
         escape_control(&relative_to(&self.prefix, path))
     }
 }
 
+/// 根相対のファイルの中身。索引の後に消えたファイルは `None`。権限などで読めなければ、
+/// 黙って結果から落とさず、パスを添えた I/O エラー（終了コード 4）にする。
+pub(crate) fn read_rel(root: &Path, path: &[u8]) -> Res<Option<Vec<u8>>> {
+    match fs::read(root.join(OsStr::from_bytes(path))) {
+        Ok(b) => Ok(Some(b)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Fail::io(format!(
+            "{}: {e}",
+            String::from_utf8_lossy(&escape_control(path))
+        ))),
+    }
+}
+
+/// 失敗しうる `or_insert_with`。
+pub(crate) fn cached<K: Eq + Hash, V>(
+    map: &mut HashMap<K, V>,
+    key: K,
+    load: impl FnOnce() -> Res<V>,
+) -> Res<&mut V> {
+    Ok(match map.entry(key) {
+        Entry::Occupied(e) => e.into_mut(),
+        Entry::Vacant(e) => e.insert(load()?),
+    })
+}
+
 /// 出力は 1 行 1 件で端末にも出るので、パスや名前の改行、ESC などの制御文字は文字列に置き換える。
-fn escape_control(path: &[u8]) -> Vec<u8> {
+/// C1 制御文字（CSI の U+009B など）と、表示の順を入れ替える双方向の制御文字も置き換える。
+/// UTF-8 として壊れたバイトはそのまま出す。
+pub(crate) fn escape_control(path: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(path.len());
-    for &b in path {
-        match b {
-            b'\n' => out.extend_from_slice(b"\\n"),
-            0..0x20 | 0x7f => out.extend(format!("\\x{b:02x}").bytes()),
-            _ => out.push(b),
+    for chunk in path.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            match c {
+                '\n' => out.extend_from_slice(b"\\n"),
+                '\0'..'\u{20}' | '\u{7f}' => out.extend(format!("\\x{:02x}", c as u32).bytes()),
+                '\u{80}'..='\u{9f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => {
+                    out.extend(format!("\\u{{{:x}}}", c as u32).bytes());
+                }
+                _ => out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes()),
+            }
         }
+        out.extend_from_slice(chunk.invalid());
     }
     out
 }
@@ -269,6 +337,12 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
     let limit = |default| cli.limit.unwrap_or(default);
     match &cli.cmd {
         Cmd::Outline(file) => outline(file, out),
+        Cmd::Trust(on) => trust_root(cwd, *on, out),
+        Cmd::Servers => {
+            let root = root_of(cwd)?;
+            let view = fresh::refresh(&root).map_err(|e| Fail::fresh(e, "rg --files"))?;
+            servers(&root, &view, out)
+        }
         Cmd::Update { rebuild, stats } => {
             let ctx = Ctx::new(cwd, "rg --files".into())?;
             let view = if *rebuild {
@@ -288,7 +362,7 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
             let lines: Vec<Vec<u8>> = hits
                 .iter()
                 .take(shown)
-                .map(|f| {
+                .map(|f| -> Res<Vec<u8>> {
                     let mut l = def_line(
                         &ctx.display(&f.path),
                         f.line,
@@ -297,18 +371,16 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
                         f.container.as_deref(),
                         &f.name,
                     );
-                    if let Some(src) = texts
-                        .entry(&f.path)
-                        .or_insert_with(|| fs::read(ctx.root.join(OsStr::from_bytes(&f.path))).ok())
+                    if let Some(src) = cached(&mut texts, &f.path, || read_rel(&ctx.root, &f.path))?
                         .as_deref()
                         .and_then(|t| source_line(t, f.line))
                     {
                         l.push(b'\t');
                         l.extend(src);
                     }
-                    l
+                    Ok(l)
                 })
-                .collect();
+                .collect::<Res<_>>()?;
             emit(out, err, &lines, hits.len())
         }
         Cmd::Files(t) => {
@@ -334,6 +406,17 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
             more(err, hits.len().saturating_sub(max))?;
             Ok(!hits.is_empty())
         }
+        Cmd::Refs(kind, t) => {
+            let ctx = Ctx::new(cwd, grep_hint(t))?;
+            refcmd::run(
+                &ctx,
+                &ctx.view()?,
+                (*kind, t, cli.precise),
+                limit(DEFAULT_LIMIT),
+                out,
+                err,
+            )
+        }
         Cmd::Map(dir) => map(
             &Ctx::new(cwd, "rg --files".into())?,
             dir.as_deref(),
@@ -344,30 +427,26 @@ fn execute(cli: &Cli, cwd: &Path, out: &mut impl Write, err: &mut impl Write) ->
     }
 }
 
-fn corrupt(_: Corrupt, ctx: &Ctx) -> Fail {
+pub(crate) fn corrupt(_: Corrupt, ctx: &Ctx) -> Fail {
     Fail::unusable("index is corrupt", &ctx.hint)
 }
 
 /// 完全一致、`Container.name`、名前の部分一致（ASCII の大小無視）の順に試す。
 /// Markdown の見出しは `.` を含み得るので、全体の完全一致を先に引く。
 /// 修飾の区切りは `::` も `.` と同じに扱う。
-fn resolve(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
-    let hits = view.lookup(term.as_bytes())?;
+pub(crate) fn resolve(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
+    let hits = resolve_exact(view, term)?;
     if !hits.is_empty() {
         return Ok(hits);
     }
-    let dotted = term.replace("::", ".");
-    let (container, name) = match dotted.rsplit_once('.') {
-        Some((c, n)) if !c.is_empty() && !n.is_empty() => (Some(c), n),
-        _ => (None, dotted.as_str()),
+    let (container, name) = split_qualified(term);
+    let keep = |f: &Found| {
+        container
+            .as_ref()
+            .is_none_or(|c| f.container.as_deref() == Some(c.as_bytes()))
     };
-    let keep = |f: &Found| container.is_none_or(|c| f.container.as_deref() == Some(c.as_bytes()));
-    let mut hits = view.lookup(name.as_bytes())?;
+    let mut hits = view.lookup_substring(name.as_bytes())?;
     hits.retain(keep);
-    if hits.is_empty() {
-        hits = view.lookup_substring(name.as_bytes())?;
-        hits.retain(keep);
-    }
     if hits.is_empty() && container.is_some() {
         // `Rust 1.100` のように `.` が名前の一部のとき
         hits = view.lookup_substring(term.as_bytes())?;
@@ -375,8 +454,32 @@ fn resolve(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
     Ok(hits)
 }
 
+/// 名前の完全一致と `Container.name` だけを引く。部分一致には広げない。
+pub(crate) fn resolve_exact(view: &View, term: &str) -> Result<Vec<Found>, Corrupt> {
+    let hits = view.lookup(term.as_bytes())?;
+    if !hits.is_empty() {
+        return Ok(hits);
+    }
+    let (container, name) = split_qualified(term);
+    let Some(container) = container else {
+        return Ok(hits);
+    };
+    let mut hits = view.lookup(name.as_bytes())?;
+    hits.retain(|f| f.container.as_deref() == Some(container.as_bytes()));
+    Ok(hits)
+}
+
+/// `A::B.c` は（`A.B`、`c`）。区切りが無ければ（None、全体）。
+fn split_qualified(term: &str) -> (Option<String>, String) {
+    let dotted = term.replace("::", ".");
+    match dotted.rsplit_once('.') {
+        Some((c, n)) if !c.is_empty() && !n.is_empty() => (Some(c.to_string()), n.to_string()),
+        _ => (None, dotted),
+    }
+}
+
 /// `path:line:col kind Container.name`
-fn def_line(
+pub(crate) fn def_line(
     path: &[u8],
     line: u32,
     col: u32,
@@ -396,7 +499,7 @@ fn def_line(
 
 /// `line`（1 始まり）行目を、前後の空白を除き 160 字までにして制御文字を逃がしたもの。
 /// 行が無いとき（索引の後でファイルが縮んだ）は None。
-fn source_line(text: &[u8], line: u32) -> Option<Vec<u8>> {
+pub(crate) fn source_line(text: &[u8], line: u32) -> Option<Vec<u8>> {
     let raw = text
         .split(|&b| b == b'\n')
         .nth(line.checked_sub(1)? as usize)?;
@@ -411,7 +514,12 @@ fn source_line(text: &[u8], line: u32) -> Option<Vec<u8>> {
 }
 
 /// 表示する行を標準出力へ。全 `total` 件のうち出さなかった分は標準エラーに件数だけ出す。
-fn emit(out: &mut impl Write, err: &mut impl Write, lines: &[Vec<u8>], total: usize) -> Res {
+pub(crate) fn emit(
+    out: &mut impl Write,
+    err: &mut impl Write,
+    lines: &[Vec<u8>],
+    total: usize,
+) -> Res {
     for l in lines {
         out.write_all(l)?;
         out.write_all(b"\n")?;
@@ -420,7 +528,7 @@ fn emit(out: &mut impl Write, err: &mut impl Write, lines: &[Vec<u8>], total: us
     Ok(total > 0)
 }
 
-fn more(err: &mut impl Write, rest: usize) -> io::Result<()> {
+pub(crate) fn more(err: &mut impl Write, rest: usize) -> io::Result<()> {
     if rest > 0 {
         writeln!(err, "… {rest} more")?;
     }
@@ -472,7 +580,7 @@ fn show_one(ctx: &Ctx, f: &Found, out: &mut impl Write) -> Res<()> {
     let Some(lang) = lang_of(rel) else {
         return Ok(());
     };
-    let Ok(src) = fs::read(ctx.root.join(rel)) else {
+    let Some(src) = read_rel(&ctx.root, &f.path)? else {
         return Ok(());
     };
     let Some(def) = extract(lang, &src)
@@ -549,7 +657,58 @@ fn map_dir(ctx: &Ctx, dir: Option<&Path>) -> Res<Vec<u8>> {
     Ok(dir_prefix(rel))
 }
 
-/// `limit` は表示した件数で数える（バイナリや読めないファイルは数えない）。
+fn root_of(cwd: &Path) -> Res<PathBuf> {
+    find_root(cwd).ok_or_else(|| Fail {
+        code: EXIT_UNUSABLE,
+        msg: "ferrindex: not inside a git repository".into(),
+    })
+}
+
+/// 信頼は端末の利用者だけが与えられる。端末を持たない Claude Code の Bash などは自分で信頼できない。
+fn trust_root(cwd: &Path, on: bool, out: &mut impl Write) -> Res {
+    let root = root_of(cwd)?;
+    if on && !io::stdin().is_terminal() {
+        return Err(Fail {
+            code: EXIT_USAGE,
+            msg: "ferrindex: trust は端末から実行してください".into(),
+        });
+    }
+    trust::set(&root, on)?;
+    out.write_all(if on { b"trusted " } else { b"untrusted " })?;
+    out.write_all(&escape_control(root.as_os_str().as_bytes()))?;
+    out.write_all(b"\n")?;
+    Ok(true)
+}
+
+/// 索引にある言語ごとに、ファイル数と言語サーバーの導入状況をタブ区切りで出す。
+fn servers(root: &Path, view: &View, out: &mut impl Write) -> Res {
+    let files = view.files();
+    writeln!(
+        out,
+        "language\tfiles\tserver\tinstalled\tprerequisite\tinstall"
+    )?;
+    let mut any = false;
+    for lang in Lang::ALL.into_iter().filter(|&l| l != Lang::Markdown) {
+        let n = files.iter().filter(|(_, s)| s.lang == lang as u8).count();
+        if n == 0 {
+            continue;
+        }
+        let st = lsp::setup(lang, root);
+        writeln!(
+            out,
+            "{}\t{n}\t{}\t{}\t{}\t{}",
+            format!("{lang:?}").to_lowercase(),
+            lsp::server_name(lang),
+            if st.installed { "yes" } else { "no" },
+            st.missing.as_deref().unwrap_or("ok"),
+            lsp::install_command(lang),
+        )?;
+        any = true;
+    }
+    Ok(any)
+}
+
+/// `limit` は表示した件数で数える（バイナリと消えたファイルは数えない）。
 fn map(
     ctx: &Ctx,
     dir: Option<&Path>,
@@ -572,7 +731,7 @@ fn map(
         }
         seen += 1;
         let rel = Path::new(OsStr::from_bytes(path));
-        let Ok(bytes) = fs::read(ctx.root.join(rel)) else {
+        let Some(bytes) = read_rel(&ctx.root, path)? else {
             continue;
         };
         if is_binary(&bytes) {
@@ -593,6 +752,30 @@ fn map(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_rel_returns_none_only_for_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "x").unwrap();
+        assert_eq!(
+            read_rel(dir.path(), b"a.rs").ok().unwrap(),
+            Some(b"x".to_vec())
+        );
+        assert_eq!(read_rel(dir.path(), b"gone.rs").ok().unwrap(), None);
+        // ディレクトリは読めない（NotFound でない）ので、パスを添えた終了コード 4。
+        let e = read_rel(dir.path(), b"").err().unwrap();
+        assert_eq!(e.code, EXIT_IO);
+        assert!(e.msg.starts_with("ferrindex: : "), "{}", e.msg);
+    }
+
+    #[test]
+    fn cached_loads_once_and_passes_failures_through() {
+        let mut map = HashMap::new();
+        assert_eq!(*cached(&mut map, 1, || Ok(10)).ok().unwrap(), 10);
+        assert_eq!(*cached(&mut map, 1, || Ok(20)).ok().unwrap(), 10);
+        assert!(cached(&mut map, 2, || Err(Fail::io("x"))).is_err());
+        assert!(!map.contains_key(&2));
+    }
 
     #[test]
     fn broken_pipe_is_quiet_success_and_other_io_is_exit_4() {
@@ -629,6 +812,23 @@ mod tests {
         );
         assert_eq!(escape_control(b" ~\x80\xe3"), b" ~\x80\xe3");
         assert_eq!(escape_control("日本.rs".as_bytes()), "日本.rs".as_bytes());
+    }
+
+    #[test]
+    fn escape_control_covers_c1_and_bidi_controls() {
+        let esc = |s: &str| String::from_utf8(escape_control(s.as_bytes())).unwrap();
+        assert_eq!(esc("a\u{80}\u{9b}\u{9f}b"), "a\\u{80}\\u{9b}\\u{9f}b");
+        assert_eq!(
+            esc("\u{202a}\u{202e}\u{2066}\u{2069}"),
+            "\\u{202a}\\u{202e}\\u{2066}\\u{2069}"
+        );
+        // 範囲のすぐ外の文字はそのまま。
+        assert_eq!(
+            esc("\u{7e}\u{a0}\u{2029}\u{202f}\u{2065}\u{206a}"),
+            "\u{7e}\u{a0}\u{2029}\u{202f}\u{2065}\u{206a}"
+        );
+        // 壊れた UTF-8 の後ろでも見つける。
+        assert_eq!(escape_control(b"\xff\xc2\x9b"), b"\xff\\u{9b}");
     }
 
     #[test]
